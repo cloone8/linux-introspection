@@ -16,13 +16,21 @@ MODULE_DESCRIPTION("PeekFS introspection filesystem");
 // ProcFS related vars
 struct proc_dir_entry* proc_main;
 
-// Timer related vars
-static void process_refresh_handler(struct work_struct* work);
-static unsigned interrupt_count = 0;
-static struct workqueue_struct *my_workqueue;
-static DECLARE_DELAYED_WORK(process_refresh_task, process_refresh_handler);
+// Kprobe related vars
+static void kp_fork_handler(struct kprobe* probe, struct pt_regs* regs, unsigned long flags);
+// static void kp_exec_handler(struct kprobe* probe, struct pt_regs* regs, unsigned long flags);
+static int kp_exit_handler(struct kprobe* probe, struct pt_regs* regs);
 
-static volatile int die = 0;
+static struct kprobe kp_fork = {
+    .symbol_name = "copy_process",
+    .post_handler = kp_fork_handler
+};
+
+// static struct kprobe kp_exec;
+static struct kprobe kp_exit = {
+    .symbol_name = "do_exit",
+    .pre_handler = kp_exit_handler
+};
 
 // static ssize_t mywrite(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos) {
 // 	printk( KERN_DEBUG "write handler\n");
@@ -38,20 +46,59 @@ static volatile int die = 0;
 //     .proc_read = myread,
 //     .proc_write = mywrite
 // };
-static void process_refresh_handler(struct work_struct* work) {
-	interrupt_count++;
 
-    printk(KERN_INFO "Interrupt %u called\n", interrupt_count);
+static void kp_fork_handler(struct kprobe* probe, struct pt_regs* regs, unsigned long flags) {
+    struct task_struct* forked_task;
 
-    if(die) {
-        return;
+    printk(KERN_INFO "Fork handler\n");
+
+    printk(KERN_INFO "Fork called in %s with pid %d\n", current->comm, current->pid);
+
+    forked_task = (struct task_struct*) regs_return_value(regs);
+
+    printk(KERN_INFO "Retval: %p\n", forked_task);
+}
+
+static int kp_exit_handler(struct kprobe* probe, struct pt_regs* regs) {
+    printk(KERN_INFO "Exit handler for %s with pid %d\n", current->comm, current->pid);
+
+    if(peekfs_remove_task_by_pid(current->pid) != 0) {
+        printk(KERN_WARNING "Could not remove task %s with pid %d from peekable task list\n", current->comm, current->pid);
     }
 
-    if(peekfs_refresh_task_list() != 0) {
-        printk(KERN_ERR "Error refreshing task list\n");
+    return 0;
+}
+
+static int peekfs_register_kprobes(void) {
+    int retval;
+
+    retval = register_kprobe(&kp_exit);
+
+    if(retval < 0) {
+        printk(KERN_INFO "Registering exit kprobe failed, returned %d\n", retval);
+        goto err_register_kprobes_exit;
     }
 
-    queue_delayed_work(my_workqueue, &process_refresh_task, PEEKFS_REFRESH_PROCESS_TASK_INTERVAL_JIFFIES);
+    retval = register_kprobe(&kp_fork);
+
+    if(retval < 0) {
+        printk(KERN_INFO "Registering fork kprobe failed, returned %d\n", retval);
+        goto err_register_kprobes_fork;
+    }
+
+    return 0;
+    // Normally unreachable cleanup routines
+
+    unregister_kprobe(&kp_fork);
+err_register_kprobes_fork:
+    unregister_kprobe(&kp_exit);
+err_register_kprobes_exit:
+    return 1;
+}
+
+static void peekfs_remove_kprobes(void) {
+    unregister_kprobe(&kp_exit);
+    unregister_kprobe(&kp_fork);
 }
 
 static int __init peekfs_init(void) {
@@ -65,47 +112,44 @@ static int __init peekfs_init(void) {
         goto err_proc_mkdir;
     }
 
-    printk(KERN_INFO "Initializing background work queue\n");
-    my_workqueue = create_workqueue(PEEKFS_WORKQUEUE_NAME);
-
-    if(!my_workqueue) {
-        printk(KERN_ERR "Error creating workqueue\n");
-        goto err_create_workqueue;
+    // Do the initial peekable task list initialization
+    printk(KERN_INFO "Initializing peekable task list\n");
+    if(peekfs_refresh_task_list() != 0) {
+        printk(KERN_ERR "Could not initialize the peekable task list\n");
+        goto err_init_task_list;
     }
 
-    printk(KERN_INFO "Initializing process refresh task\n");
-    if(!queue_delayed_work(my_workqueue, &process_refresh_task, PEEKFS_REFRESH_PROCESS_TASK_INTERVAL_JIFFIES)) {
-        printk(KERN_ERR "Error scheduling process refresh task\n");
-        goto err_queue_process_refresh;
+    // Register the kprobes
+    printk(KERN_INFO "Registering kprobes\n");
+    if(peekfs_register_kprobes() != 0) {
+        printk(KERN_ERR "Could not register kprobes\n");
+        goto err_register_kprobes;
     }
 
-    printk(KERN_INFO "Done initializing PeekFS\n");
     return 0;
 
     // Error handlers that should not be encountered during normal execution
-    die = 1;
-    cancel_delayed_work(&process_refresh_task);
+    peekfs_remove_kprobes();
 
-err_queue_process_refresh:
-    flush_workqueue(my_workqueue);
-    destroy_workqueue(my_workqueue);
+err_register_kprobes:
+    peekfs_clear_task_list();
 
-err_create_workqueue:
+err_init_task_list:
     proc_remove(proc_main);
 
 err_proc_mkdir:
-    return 1;
+    return -1;
 }
 
 static void __exit peekfs_exit(void) {
     printk(KERN_INFO "Stopping PeekFS\n");
 
-    printk(KERN_INFO "Stopping background work\n");
-    die = 1;
-    cancel_delayed_work(&process_refresh_task);
-    flush_workqueue(my_workqueue);
-    destroy_workqueue(my_workqueue);
+    printk(KERN_INFO "Removing kprobes\n");
+    peekfs_remove_kprobes();
 
+    printk(KERN_INFO "Destroying peekable task list\n");
+
+    peekfs_clear_task_list();
     printk(KERN_INFO "Destroying proc filesystem\n");
 
     proc_remove(proc_main);
