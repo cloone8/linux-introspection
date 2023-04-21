@@ -1,6 +1,7 @@
-EXTRA_CFLAGS=-Wall
+EXTRA_CFLAGS=-Wall -Werror -I$(src)/include
 
-obj-m = hello.o
+obj-m+= peekfs.o
+peekfs-y+= peekfs_main.o process.o
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build/ M=$(PWD) modules
