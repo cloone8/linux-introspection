@@ -2,13 +2,17 @@
 #include <linux/proc_fs.h>
 #include <linux/sched.h>
 #include <linux/list.h>
+#include <linux/mutex.h>
+
 #include <process.h>
 #include <peekfs.h>
 
 #define BUFSIZE (256)
 
 static LIST_HEAD(_peekable_process_list);
-struct list_head* peekable_process_list = &_peekable_process_list;
+static struct list_head* peekable_process_list = &_peekable_process_list;
+
+DEFINE_MUTEX(peekable_process_list_mtx);
 
 struct peekable_process {
     struct list_head list;
@@ -59,10 +63,23 @@ static struct peekable_process* find_process_in_list(pid_t pid) {
     return NULL;
 }
 
-static void peekfs_remove_task(struct peekable_process* process) {
+static void remove_peekable_process(struct peekable_process* process) {
     proc_remove(process->proc_entry);
     list_del(&process->list);
     kfree(process);
+}
+
+static void clear_peekable_processes(void) {
+    struct list_head *cur, *next;
+
+    list_for_each_safe(cur, next, peekable_process_list) {
+        struct peekable_process* task = container_of(cur, struct peekable_process, list);
+        remove_peekable_process(task);
+    }
+}
+
+static int update_peekable_process(struct peekable_process* peekable, struct task_struct* task) {
+    return 0;
 }
 
 int peekfs_remove_task_by_pid(pid_t pid) {
@@ -71,7 +88,7 @@ int peekfs_remove_task_by_pid(pid_t pid) {
     process = find_process_in_list(pid);
 
     if(process != NULL) {
-        peekfs_remove_task(process);
+        remove_peekable_process(process);
         return 0;
     } else {
         return 1;
@@ -79,27 +96,60 @@ int peekfs_remove_task_by_pid(pid_t pid) {
 }
 
 int peekfs_add_task(struct task_struct* task) {
-    if(register_task(task) != NULL) {
+    struct peekable_process* ret;
+
+    mutex_lock(&peekable_process_list_mtx);
+    ret = register_task(task);
+    mutex_unlock(&peekable_process_list_mtx);
+
+    if(ret != NULL) {
         return 0;
     }
 
     return 1;
 }
 
-void peekfs_clear_task_list(void) {
-    struct list_head *cur, *next;
+int peekfs_update_task(struct task_struct* task) {
+    struct peekable_process* peekable;
+    int update_ret;
+    int retval = 0;
 
-    list_for_each_safe(cur, next, peekable_process_list) {
-        struct peekable_process* task = container_of(cur, struct peekable_process, list);
-        peekfs_remove_task(task);
+    mutex_lock(&peekable_process_list_mtx);
+
+    peekable = find_process_in_list(task->pid);
+
+    if(peekable == NULL) {
+        retval = 1;
+        goto update_task_ret;
     }
+
+    update_ret = update_peekable_process(peekable, task);
+
+    if(update_ret != 0) {
+        retval = 2;
+        goto update_task_ret;
+    }
+
+update_task_ret:
+    mutex_unlock(&peekable_process_list_mtx);
+    return retval;
+}
+
+void peekfs_clear_task_list(void) {
+    mutex_lock(&peekable_process_list_mtx);
+
+    clear_peekable_processes();
+
+    mutex_unlock(&peekable_process_list_mtx);
 }
 
 int peekfs_refresh_task_list(void) {
     struct task_struct* task_list;
 
+    mutex_lock(&peekable_process_list_mtx);
+
     // First, clean the entire list
-    peekfs_clear_task_list();
+    clear_peekable_processes();
 
     // Now add the new ones
     for_each_process(task_list) {
@@ -107,10 +157,12 @@ int peekfs_refresh_task_list(void) {
             printk(KERN_ERR "Could not register task %d in peekfs\n", task_list->pid);
 
             // Clear the list, something went wrong!
-            peekfs_clear_task_list();
+            clear_peekable_processes();
+            mutex_unlock(&peekable_process_list_mtx);
             return 1;
         }
     }
 
+    mutex_unlock(&peekable_process_list_mtx);
     return 0;
 }

@@ -17,19 +17,33 @@ MODULE_DESCRIPTION("PeekFS introspection filesystem");
 struct proc_dir_entry* proc_main;
 
 // Kprobe related vars
-static void kp_fork_handler(struct kprobe* probe, struct pt_regs* regs, unsigned long flags);
-// static void kp_exec_handler(struct kprobe* probe, struct pt_regs* regs, unsigned long flags);
-static int kp_exit_handler(struct kprobe* probe, struct pt_regs* regs);
+static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
+static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
+static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
 
-static struct kprobe kp_fork = {
-    .symbol_name = "copy_process",
-    .post_handler = kp_fork_handler
+struct krp_data {
+
 };
 
-// static struct kprobe kp_exec;
-static struct kprobe kp_exit = {
-    .symbol_name = "do_exit",
-    .pre_handler = kp_exit_handler
+static struct kretprobe krp_fork = {
+    .kp.symbol_name = "copy_process",
+    .handler = krp_fork_handler,
+    .data_size = sizeof(struct krp_data),
+    .maxactive = 2 * NR_CPUS
+};
+
+static struct kretprobe krp_exec = {
+    .kp.symbol_name = "bprm_execve",
+    .handler = krp_exec_handler,
+    .data_size = sizeof(struct krp_data),
+    .maxactive = 2 * NR_CPUS
+};
+
+static struct kretprobe krp_exit = {
+    .kp.symbol_name = "do_exit",
+    .entry_handler = krp_exit_handler,
+    .data_size = sizeof(struct krp_data),
+    .maxactive = 2 * NR_CPUS
 };
 
 // static ssize_t mywrite(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos) {
@@ -47,19 +61,33 @@ static struct kprobe kp_exit = {
 //     .proc_write = mywrite
 // };
 
-static void kp_fork_handler(struct kprobe* probe, struct pt_regs* regs, unsigned long flags) {
+static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
     struct task_struct* forked_task;
 
-    printk(KERN_INFO "Fork handler\n");
-
-    printk(KERN_INFO "Fork called in %s with pid %d\n", current->comm, current->pid);
+    printk(KERN_INFO "Fork handler called in %s with pid %d\n", current->comm, current->pid);
 
     forked_task = (struct task_struct*) regs_return_value(regs);
 
-    printk(KERN_INFO "Retval: %p\n", forked_task);
+    printk(KERN_INFO "Forked task vals: %d %s\n", forked_task->pid, forked_task->comm);
+
+    if(peekfs_add_task(forked_task) != 0) {
+        printk(KERN_WARNING "Could not add task %s with pid %d to peekable task list\n", forked_task->comm, forked_task->pid);
+    }
+
+    return 0;
 }
 
-static int kp_exit_handler(struct kprobe* probe, struct pt_regs* regs) {
+static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
+    printk(KERN_INFO "Exec handler for %s with pid %d\n", current->comm, current->pid);
+
+    if(peekfs_update_task(current) != 0) {
+        printk(KERN_WARNING "Could not update task %s with pid %d in peekable task list\n", current->comm, current->pid);
+    }
+
+    return 0;
+}
+
+static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
     printk(KERN_INFO "Exit handler for %s with pid %d\n", current->comm, current->pid);
 
     if(peekfs_remove_task_by_pid(current->pid) != 0) {
@@ -72,33 +100,42 @@ static int kp_exit_handler(struct kprobe* probe, struct pt_regs* regs) {
 static int peekfs_register_kprobes(void) {
     int retval;
 
-    retval = register_kprobe(&kp_exit);
+    retval = register_kretprobe(&krp_exit);
 
     if(retval < 0) {
-        printk(KERN_INFO "Registering exit kprobe failed, returned %d\n", retval);
+        printk(KERN_INFO "Registering exit kretprobe failed, returned %d\n", retval);
         goto err_register_kprobes_exit;
     }
 
-    retval = register_kprobe(&kp_fork);
+    retval = register_kretprobe(&krp_fork);
 
     if(retval < 0) {
-        printk(KERN_INFO "Registering fork kprobe failed, returned %d\n", retval);
+        printk(KERN_INFO "Registering fork kretprobe failed, returned %d\n", retval);
         goto err_register_kprobes_fork;
+    }
+
+    retval = register_kretprobe(&krp_exec);
+
+    if(retval < 0) {
+        printk(KERN_INFO "Registering exec kretprobe failed, returned %d\n", retval);
+        goto err_register_kprobes_exec;
     }
 
     return 0;
     // Normally unreachable cleanup routines
-
-    unregister_kprobe(&kp_fork);
+    unregister_kretprobe(&krp_exec);
+err_register_kprobes_exec:
+    unregister_kretprobe(&krp_fork);
 err_register_kprobes_fork:
-    unregister_kprobe(&kp_exit);
+    unregister_kretprobe(&krp_exit);
 err_register_kprobes_exit:
     return 1;
 }
 
 static void peekfs_remove_kprobes(void) {
-    unregister_kprobe(&kp_exit);
-    unregister_kprobe(&kp_fork);
+    unregister_kretprobe(&krp_exit);
+    unregister_kretprobe(&krp_fork);
+    unregister_kretprobe(&krp_exec);
 }
 
 static int __init peekfs_init(void) {
