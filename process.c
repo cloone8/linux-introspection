@@ -1,17 +1,20 @@
+#include <linux/bug.h>
+#include <linux/elf.h>
+#include <linux/err.h>
+#include <linux/fs.h>
+#include <linux/highmem.h>
 #include <linux/kernel.h>
+#include <linux/list.h>
+#include <linux/mm.h>
+#include <linux/mmap_lock.h>
+#include <linux/mutex.h>
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
 #include <linux/rwlock.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
-#include <linux/mmap_lock.h>
-#include <linux/list.h>
-#include <linux/mutex.h>
-#include <linux/fs.h>
-#include <linux/err.h>
-#include <linux/elf.h>
-#include <linux/mm.h>
-#include <linux/highmem.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 
 #include <process.h>
 #include <peekfs.h>
@@ -25,15 +28,26 @@ static struct list_head* peekable_process_list = &_peekable_process_list;
 DEFINE_MUTEX(peekable_process_list_mtx);
 
 struct peekable_process {
-    struct list_head list;
+    struct list_head list; // List NODE in the peekable process list
     struct task_struct* task;
     struct proc_dir_entry* proc_entry;
-    struct list_head isdata_sections;
+    struct list_head isdata_sections; // List HEAD of this process' isdata sections list
 };
 
 struct isdata_section {
     struct list_head list;
+    void __user* isdata_start;
 };
+
+// Pre-define internal functions
+static int check_task_peekable(struct task_struct* task, struct list_head* isdata_sections);
+static struct peekable_process* register_task(struct task_struct* task);
+static struct peekable_process* find_process_in_list(pid_t pid);
+static void remove_isdata_sections(struct list_head* isdata_sections);
+static void remove_peekable_process(struct peekable_process* process);
+static void clear_peekable_processes(void);
+static int update_peekable_process(struct peekable_process* peekable, struct task_struct* task);
+static int check_task_peekable(struct task_struct* task, struct list_head* isdata_sections);
 
 static struct peekable_process* register_task(struct task_struct* task) {
     char name_buf[BUFSIZE];
@@ -59,7 +73,8 @@ static struct peekable_process* register_task(struct task_struct* task) {
 
     new_entry->proc_entry = task_entry;
     new_entry->task = task;
-    new_entry->isdata_sections = LIST_HEAD_INIT(new_entry->isdata_sections);
+    INIT_LIST_HEAD(&new_entry->isdata_sections);
+
     list_add(&new_entry->list, peekable_process_list);
 
     return new_entry;
@@ -79,7 +94,18 @@ static struct peekable_process* find_process_in_list(pid_t pid) {
     return NULL;
 }
 
+static void remove_isdata_sections(struct list_head* isdata_sections) {
+    struct list_head *cur, *next;
+
+    list_for_each_safe(cur, next, isdata_sections) {
+        struct isdata_section* isdata_section = container_of(cur, struct isdata_section, list);
+        list_del(&isdata_section->list);
+        kfree(isdata_section);
+    }
+}
+
 static void remove_peekable_process(struct peekable_process* process) {
+    remove_isdata_sections(&process->isdata_sections);
     proc_remove(process->proc_entry);
     list_del(&process->list);
     kfree(process);
@@ -95,14 +121,23 @@ static void clear_peekable_processes(void) {
 }
 
 static int update_peekable_process(struct peekable_process* peekable, struct task_struct* task) {
+    //TODO: implement
     return 0;
 }
 
-static void __user *check_task_peekable(struct task_struct* task) {
+/**
+ * Checks whether the given task is peekable by looking for valid .isdata
+ * sections in each of the binaries of the task's memory space.
+ *
+ * Returns the amount of valid isdata sections found, or a -ERRVAL
+ */
+static int check_task_peekable(struct task_struct* task, struct list_head* isdata_sections) {
     int retval = 0;
     struct mm_struct* mm;
     struct vm_area_struct *vma, *vma_next;
     char path_buf[BUFSIZE + 1] = {0}; // +1 so we always keep a null terminator
+
+    WARN_ON(!list_empty(isdata_sections)); // The incoming list of isdata_sections must be empty
 
     // Acquire the task mm
     mm = get_task_mm(task);
@@ -125,7 +160,7 @@ static void __user *check_task_peekable(struct task_struct* task) {
         int mm_locked = 1;
         struct page* first_page;
         Elf64_Ehdr* elf_hdr;
-        void* isdata_start;
+        void __user* isdata_start;
 
         // Prep for next iteration
         vma = vma_next;
@@ -175,8 +210,6 @@ static void __user *check_task_peekable(struct task_struct* task) {
             continue;
         }
 
-
-
         printk(KERN_INFO "Detected ELF header in file %s at %p for process %d (%s)\n", vma_file_path, (void*)vma->vm_start, task->pid, task->comm);
 
         isdata_start = peekfs_get_isdata_section_start(mm, elf_hdr);
@@ -185,12 +218,25 @@ static void __user *check_task_peekable(struct task_struct* task) {
         put_page(first_page);
 
         if(isdata_start != NULL) {
+            struct isdata_section* found_section;
+
             // Okay! We found the isdata section. This process is definitely peekable.
+            retval++;
+            found_section = kmalloc(sizeof(struct isdata_section), GFP_KERNEL);
+
+            if(found_section == NULL) {
+                remove_isdata_sections(isdata_sections);
+                retval = -ENOMEM;
+                goto check_task_peekable_ret;
+            }
+
+            found_section->isdata_start = isdata_start;
+            list_add(&found_section->list, isdata_sections);
         }
     }
 
     // Release the task mm again
-check_task_peekable_ret_ok:
+check_task_peekable_ret:
     up_read(&mm->mmap_lock);
     mmap_read_unlock(mm);
     mmput(mm);
@@ -261,6 +307,7 @@ void peekfs_clear_task_list(void) {
 
 int peekfs_refresh_task_list(void) {
     struct task_struct* task;
+    struct list_head found_isdata_sections = LIST_HEAD_INIT(found_isdata_sections);
 
     mutex_lock(&peekable_process_list_mtx);
 
@@ -271,18 +318,30 @@ int peekfs_refresh_task_list(void) {
     rcu_read_lock();
 
     for_each_process(task) {
-        if(check_task_peekable(task)) {
+        int retval = check_task_peekable(task, &found_isdata_sections);
+        if(retval > 0) {
+            struct peekable_process* registered_process = register_task(task);
+
             // Task is peekable. Try to register it for introspection
-            if(register_task(task) == NULL) {
+            if(registered_process == NULL) {
                 // Registration failed!
-                printk(KERN_ERR "Could not register task %d in peekfs\n", task->pid);
+                printk(KERN_ERR "Could not register task %d (%s) in peekfs\n", task->pid, task->comm);
 
                 // Clear the list, something went wrong!
+                remove_isdata_sections(&found_isdata_sections);
                 rcu_read_unlock();
                 clear_peekable_processes();
                 mutex_unlock(&peekable_process_list_mtx);
                 return 1;
             }
+            // Move the found isdata sections from our temporary list onto the real one
+            list_move(&found_isdata_sections, &registered_process->isdata_sections);
+        } else if(retval < 0) {
+            printk(KERN_ERR "Could not check task %d (%s) for peekability: %d\n", task->pid, task->comm, retval);
+            rcu_read_unlock();
+            clear_peekable_processes();
+            mutex_unlock(&peekable_process_list_mtx);
+            return 1;
         }
     }
 
