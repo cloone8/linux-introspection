@@ -46,7 +46,6 @@ static struct peekable_process* find_process_in_list(pid_t pid);
 static void remove_isdata_sections(struct list_head* isdata_sections);
 static void remove_peekable_process(struct peekable_process* process);
 static void clear_peekable_processes(void);
-static int update_peekable_process(struct peekable_process* peekable, struct task_struct* task);
 static int check_task_peekable(struct task_struct* task, struct list_head* isdata_sections);
 
 static struct peekable_process* register_task(struct task_struct* task) {
@@ -118,11 +117,6 @@ static void clear_peekable_processes(void) {
         struct peekable_process* task = container_of(cur, struct peekable_process, list);
         remove_peekable_process(task);
     }
-}
-
-static int update_peekable_process(struct peekable_process* peekable, struct task_struct* task) {
-    //TODO: implement
-    return 0;
 }
 
 /**
@@ -273,28 +267,41 @@ int peekfs_add_task(struct task_struct* task) {
 
 int peekfs_update_task(struct task_struct* task) {
     struct peekable_process* peekable;
-    int update_ret;
-    int retval = 0;
+    struct list_head found_isdata_sections = LIST_HEAD_INIT(found_isdata_sections);
+    int to_ret = 0;
+    int retval;
 
     mutex_lock(&peekable_process_list_mtx);
 
     peekable = find_process_in_list(task->pid);
 
-    if(peekable == NULL) {
-        retval = 1;
-        goto update_task_ret;
+    if(peekable != NULL) {
+        // If the process is currently peekable, remove it so we can update it
+        remove_peekable_process(peekable);
     }
 
-    update_ret = update_peekable_process(peekable, task);
+    retval = check_task_peekable(task, &found_isdata_sections);
 
-    if(update_ret != 0) {
-        retval = 2;
+    if(retval > 0) {
+        peekable = register_task(task);
+
+        if(peekable == NULL) {
+            printk(KERN_ERR "Could not register task %d (%s) in peekfs\n", task->pid, task->comm);
+            remove_isdata_sections(&found_isdata_sections);
+            to_ret = 1;
+            goto update_task_ret;
+        }
+
+        list_move(&found_isdata_sections, &peekable->isdata_sections);
+    } else if(retval < 0) {
+        printk(KERN_ERR "Could not check task %d (%s) for peekability: %d\n", task->pid, task->comm, retval);
+        to_ret = 1;
         goto update_task_ret;
     }
 
 update_task_ret:
     mutex_unlock(&peekable_process_list_mtx);
-    return retval;
+    return to_ret;
 }
 
 void peekfs_clear_task_list(void) {
