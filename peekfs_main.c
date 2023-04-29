@@ -11,6 +11,7 @@
 
 #include <peekfs.h>
 #include <process.h>
+#include <log.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PeekFS introspection filesystem");
@@ -76,17 +77,17 @@ static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* re
 
     rcu_read_lock();
 
-    printk(KERN_INFO "Fork handler called in %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_fork);
+    log_info("Fork handler called in %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_fork);
 
     forked_task = (struct task_struct*) regs_return_value(regs);
 
-    printk(KERN_INFO "Forking pid %d to %d in CPU %d %lld:%lld\n", current->pid, forked_task->pid, smp_processor_id(), my_num_handlers, my_num_fork);
+    log_info("Forking pid %d to %d in CPU %d %lld:%lld\n", current->pid, forked_task->pid, smp_processor_id(), my_num_handlers, my_num_fork);
 
     if(peekfs_add_task(forked_task) != 0) {
-        printk(KERN_WARNING "Could not add task %s with pid %d to peekable task list in CPU %d %lld:%lld\n", forked_task->comm, forked_task->pid, smp_processor_id(), my_num_handlers, my_num_fork);
+        log_warn("Could not add task %s with pid %d to peekable task list in CPU %d %lld:%lld\n", forked_task->comm, forked_task->pid, smp_processor_id(), my_num_handlers, my_num_fork);
     }
 
-    printk(KERN_INFO "Fork handler done in %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_fork);
+    log_info("Fork handler done in %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_fork);
 
     rcu_read_unlock();
 
@@ -99,13 +100,13 @@ static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* re
 
     rcu_read_lock();
 
-    printk(KERN_INFO "Exec handler for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
+    log_info("Exec handler for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
 
     if(peekfs_update_task(current) != 0) {
-        printk(KERN_WARNING "Could not update task %s with pid %d in peekable task list in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
+        log_warn("Could not update task %s with pid %d in peekable task list in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
     }
 
-    printk(KERN_INFO "Exec handler done for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
+    log_info("Exec handler done for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
 
     rcu_read_unlock();
 
@@ -118,13 +119,13 @@ static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* re
 
     rcu_read_lock();
 
-    printk(KERN_INFO "Exit handler for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
+    log_info("Exit handler for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
 
     if(peekfs_remove_task_by_pid(current->pid) != 0) {
-        printk(KERN_WARNING "Could not remove task %s with pid %d from peekable task list in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
+        log_warn("Could not remove task %s with pid %d from peekable task list in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
     }
 
-    printk(KERN_INFO "Exit handler done for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
+    log_info("Exit handler done for %s with pid %d in CPU %d %lld:%lld\n", current->comm, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
 
     rcu_read_unlock();
 
@@ -137,21 +138,21 @@ static int peekfs_register_kprobes(void) {
     retval = register_kretprobe(&krp_exit);
 
     if(retval < 0) {
-        printk(KERN_INFO "Registering exit kretprobe failed, returned %d\n", retval);
+        log_info("Registering exit kretprobe failed, returned %d\n", retval);
         goto err_register_kprobes_exit;
     }
 
     retval = register_kretprobe(&krp_fork);
 
     if(retval < 0) {
-        printk(KERN_INFO "Registering fork kretprobe failed, returned %d\n", retval);
+        log_info("Registering fork kretprobe failed, returned %d\n", retval);
         goto err_register_kprobes_fork;
     }
 
     retval = register_kretprobe(&krp_exec);
 
     if(retval < 0) {
-        printk(KERN_INFO "Registering exec kretprobe failed, returned %d\n", retval);
+        log_info("Registering exec kretprobe failed, returned %d\n", retval);
         goto err_register_kprobes_exec;
     }
 
@@ -173,27 +174,27 @@ static void peekfs_remove_kprobes(void) {
 }
 
 static int __init peekfs_init(void) {
-    printk(KERN_INFO "Initializing PeekFS\n");
+    log_info("Initializing PeekFS\n");
 
-    printk(KERN_INFO "Initializing proc filesystem base\n");
+    log_info("Initializing proc filesystem base\n");
     proc_main = proc_mkdir(PEEKFS_MAIN_DIR, NULL);
 
     if(unlikely(!proc_main)) {
-        printk(KERN_ERR "Error creating proc filesystem base\n");
+        log_err("Error creating proc filesystem base\n");
         goto err_proc_mkdir;
     }
 
     // Do the initial peekable task list initialization
-    printk(KERN_INFO "Initializing peekable task list\n");
+    log_info("Initializing peekable task list\n");
     if(unlikely(peekfs_refresh_task_list() != 0)) {
-        printk(KERN_ERR "Could not initialize the peekable task list\n");
+        log_err("Could not initialize the peekable task list\n");
         goto err_init_task_list;
     }
 
     // Register the kprobes
-    printk(KERN_INFO "Registering kprobes\n");
+    log_info("Registering kprobes\n");
     if(unlikely(peekfs_register_kprobes() != 0)) {
-        printk(KERN_ERR "Could not register kprobes\n");
+        log_err("Could not register kprobes\n");
         goto err_register_kprobes;
     }
 
@@ -213,18 +214,18 @@ err_proc_mkdir:
 }
 
 static void __exit peekfs_exit(void) {
-    printk(KERN_INFO "Stopping PeekFS\n");
+    log_info("Stopping PeekFS\n");
 
-    printk(KERN_INFO "Removing kprobes\n");
+    log_info("Removing kprobes\n");
     peekfs_remove_kprobes();
 
-    printk(KERN_INFO "Destroying peekable task list\n");
+    log_info("Destroying peekable task list\n");
 
     peekfs_clear_task_list();
-    printk(KERN_INFO "Destroying proc filesystem\n");
+    log_info("Destroying proc filesystem\n");
 
     proc_remove(proc_main);
-    printk(KERN_INFO "Cleanup done, exiting PeekFS\n");
+    log_info("Cleanup done, exiting PeekFS\n");
 }
 
 module_init(peekfs_init);

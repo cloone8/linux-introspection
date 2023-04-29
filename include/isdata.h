@@ -9,30 +9,28 @@
 
 struct peekable_process;
 
-#ifdef CONFIG_64BIT
-    typedef Elf64_Ehdr elf_ehdr;
-    #define ELF_CUR_ARCH_CLASS ELFCLASS64
+#if ELF_CLASS == ELFCLASS64
+    typedef Elf64_Ehdr elf_ehdr_t;
+    typedef Elf64_Shdr elf_shdr_t;
+    typedef Elf64_Off elf_off_t;
+    typedef Elf64_Half elf_half_t;
 #else
-    typedef Elf32_Ehdr elf_ehdr;
-    #define ELF_CUR_ARCH_CLASS ELFCLASS32
-#endif
-
-#ifdef CONFIG_CPU_BIG_ENDIAN
-    #define ELF_CUR_ARCH_ENDIAN ELFDATA2MSB
-#else
-    #define ELF_CUR_ARCH_ENDIAN ELFDATA2LSB
+    typedef Elf32_Ehdr elf_ehdr_t;
+    typedef Elf32_Shdr elf_shdr_t;
+    typedef Elf32_Off elf_off_t;
+    typedef Elf32_Half elf_half_t;
 #endif
 
 static inline int is_elf_header(void* maybe_hdr) {
-    return memcmp(((elf_ehdr*) maybe_hdr)->e_ident, ELFMAG, SELFMAG) == 0;
+    return memcmp(((elf_ehdr_t*) maybe_hdr)->e_ident, ELFMAG, SELFMAG) == 0;
 }
 
-static inline int ehdr_arch_compatible(elf_ehdr* ehdr) {
+static inline int ehdr_arch_compatible(elf_ehdr_t* ehdr) {
     peekfs_assert(is_elf_header(ehdr));
-    return ehdr->e_ident[EI_CLASS] == ELF_CUR_ARCH_CLASS && ehdr->e_ident[EI_DATA] == ELF_CUR_ARCH_ENDIAN;
+    return ehdr->e_ident[EI_CLASS] == ELF_CLASS && ehdr->e_ident[EI_DATA] == ELF_DATA;
 }
 
-void __user* peekfs_get_isdata_section_start(struct mm_struct* mm, elf_ehdr* ehdr);
+void __user* peekfs_get_isdata_section_start(struct mm_struct* mm, elf_ehdr_t* ehdr, void __user* file_base);
 int peekfs_parse_isdata_sections(struct peekable_process* peekable, struct list_head* isdata_sections, struct mm_struct* mm);
 
 #endif

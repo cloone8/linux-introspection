@@ -23,6 +23,7 @@
 #include <peekfs.h>
 #include <isdata.h>
 #include <debug.h>
+#include <log.h>
 
 /*
     TODO: Use get_task_comm instead of raw task->comm
@@ -52,21 +53,21 @@ static struct peekable_process *create_peekable_process(struct task_struct *task
     retval = snprintf(name_buf, PEEKFS_SMALLBUFSIZE - 1, "%d", task->pid);
 
     if(unlikely(retval >= PEEKFS_SMALLBUFSIZE)) {
-        // Bad, but not fatal
-        printk(KERN_WARNING "Process PID truncated: %d\n", retval);
+        log_err("Process PID truncated: %d. Filesystem incoherent\n", retval);
+        return NULL;
     }
 
     task_entry = proc_mkdir(name_buf, proc_main);
 
     if(unlikely(task_entry == NULL)) {
-        printk(KERN_ERR "Could not create proc entry for task\n");
+        log_err("Could not create proc entry for task\n");
         return NULL;
     }
 
     new_entry = kmalloc(sizeof(struct peekable_process), GFP_KERNEL);
 
     if(unlikely(new_entry == NULL)) {
-        printk(KERN_ERR "Could not allocate task struct\n");
+        log_err("Could not allocate task struct\n");
         proc_remove(task_entry);
         return NULL;
     }
@@ -91,6 +92,11 @@ static struct peekable_process *register_task_if_peekable(struct task_struct *ta
     struct list_head found_isdata_sections = LIST_HEAD_INIT(found_isdata_sections);
     int retval;
 
+    if((task->flags & PF_KTHREAD) || is_global_init(task)) {
+        log_info("Skipping %d (%s) as it is a kernel process\n", task->pid, task->comm);
+        return 0; // Skip kernel threads for now
+    }
+
     retval = check_task_peekable(task, &found_isdata_sections);
 
     if(retval > 0) {
@@ -100,14 +106,14 @@ static struct peekable_process *register_task_if_peekable(struct task_struct *ta
         to_ret = create_peekable_process(task);
 
         if(unlikely(to_ret == NULL)) {
-            printk(KERN_ERR "Could not register task %d (%s) in peekfs\n", task->pid, task->comm);
+            log_err("Could not register task %d (%s) in peekfs\n", task->pid, task->comm);
             goto ret_err;
         }
 
         task_mm = get_task_mm(task);
 
         if(unlikely(task_mm == NULL)) {
-            printk(KERN_ERR "Could not get task mm for task %d (%s)\n", task->pid, task->comm);
+            log_err("Could not get task mm for task %d (%s)\n", task->pid, task->comm);
             goto ret_err;
         }
 
@@ -115,11 +121,11 @@ static struct peekable_process *register_task_if_peekable(struct task_struct *ta
         mmput(task_mm);
 
         if(unlikely(retval != 0)) {
-            printk(KERN_ERR "Could not parse task %d (%s) isdata sections\n", task->pid, task->comm);
+            log_err("Could not parse task %d (%s) isdata sections\n", task->pid, task->comm);
             goto ret_err;
         }
     } else if(unlikely(retval < 0)) {
-        printk(KERN_ERR "Could not check task %d (%s) for peekability: %d\n", task->pid, task->comm, retval);
+        log_err("Could not check task %d (%s) for peekability: %d\n", task->pid, task->comm, retval);
         goto ret_err;
     }
 
@@ -188,7 +194,7 @@ static struct isdata_section* find_isdata_section_for_vma(struct vm_area_struct*
     ssize_t strscpy_retval;
     int mm_locked = 1;
     struct page *first_page;
-    elf_ehdr *elf_hdr;
+    elf_ehdr_t *elf_hdr;
     void __user *isdata_start;
     char path_buf[PEEKFS_BIGBUFSIZE] = {0}; // +1 so we always keep a null terminator
 
@@ -214,7 +220,7 @@ static struct isdata_section* find_isdata_section_for_vma(struct vm_area_struct*
 
     if(unlikely(IS_ERR(vma_file_path) || ((vma_file_path_len = strnlen(vma_file_path, PEEKFS_BIGBUFSIZE)) == PEEKFS_BIGBUFSIZE))) {
         // In addition to checking whether d_path returned an error, make sure the buffer had enough space
-        printk(KERN_WARNING "Error reading filepath for VMA %p->%p: %ld\n", (void *)vma->vm_start, (void *)vma->vm_end, PTR_ERR(vma_file_path));
+        log_warn("Error reading filepath for VMA %px->%px: %ld\n", (void *)vma->vm_start, (void *)vma->vm_end, PTR_ERR(vma_file_path));
         return IS_ERR(vma_file_path) ? vma_file_path : ERR_PTR(-ENOMEM);
     }
 
@@ -226,26 +232,27 @@ static struct isdata_section* find_isdata_section_for_vma(struct vm_area_struct*
     }
 
     if(unlikely(gup_retval <= 0)) {
-        printk(KERN_WARNING "Error retrieving memory for VMA %p->%p\n", (void*)vma->vm_start, (void*)vma->vm_end);
+        log_warn("Error retrieving memory for VMA %px->%px\n", (void*)vma->vm_start, (void*)vma->vm_end);
         return gup_retval < 0 ? ERR_PTR(gup_retval) : ERR_PTR(-EIO);
     }
 
-    elf_hdr = kmap(first_page);
+    elf_hdr = kmap_local_page(first_page);
 
     if(!is_elf_header(elf_hdr) || unlikely(!ehdr_arch_compatible(elf_hdr))) {
         // The beginning of the file does not contain an ELF header
-        kunmap(first_page);
+        kunmap_local(elf_hdr);
         put_page(first_page);
         return NULL;
     }
 
-    isdata_start = peekfs_get_isdata_section_start(mm, elf_hdr);
+    log_info("Checking VMA backed by %s\n", vma_file_path);
+    isdata_start = peekfs_get_isdata_section_start(mm, elf_hdr, (void*) vma->vm_start);
 
-    kunmap(first_page);
+    kunmap_local(elf_hdr);
     put_page(first_page);
 
     if(unlikely(IS_ERR(isdata_start))) {
-        printk(KERN_WARNING "Error finding isdata start for VMA %p->%p\n", (void*)vma->vm_start, (void*)vma->vm_end);
+        log_warn("Error finding isdata start for VMA %px->%px\n", (void*)vma->vm_start, (void*)vma->vm_end);
         return isdata_start;
     }
 
@@ -287,6 +294,8 @@ static int check_task_peekable(struct task_struct *task, struct list_head *isdat
 
     peekfs_assert(list_empty(isdata_sections)); // The incoming list of isdata_sections must be empty
 
+    log_info("Checking task %d (%s)\n", task->pid, task->comm);
+
     // Acquire the task mm
     mm = get_task_mm(task);
 
@@ -311,7 +320,7 @@ static int check_task_peekable(struct task_struct *task, struct list_head *isdat
         found_section = find_isdata_section_for_vma(vma, mm);
 
         if(unlikely(IS_ERR(found_section))) {
-            printk(KERN_WARNING "Could not check VMA %p->%p in task %d (%s) for peekability: %ld\n", (void*)vma->vm_start, (void*)vma->vm_end, task->pid, task->comm, PTR_ERR(found_section));
+            log_warn("Could not check VMA %px->%px in task %d (%s) for peekability: %ld\n", (void*)vma->vm_start, (void*)vma->vm_end, task->pid, task->comm, PTR_ERR(found_section));
             continue;
         }
 
@@ -352,9 +361,7 @@ int peekfs_add_task(struct task_struct *task) {
 
     mutex_lock(&peekable_process_list_mtx);
 
-    printk(KERN_INFO "Trying to register new task, if possible, for PID %d\n", task->pid);
     ret = register_task_if_peekable(task);
-    printk(KERN_INFO "Registration for PID %d done. Value: %p, succesful: %d, NULL %d\n", task->pid, ret, !IS_ERR(ret), ret == NULL);
 
     mutex_unlock(&peekable_process_list_mtx);
 
@@ -362,7 +369,7 @@ int peekfs_add_task(struct task_struct *task) {
         return 1;
     }
 
-    return 1;
+    return 0;
 }
 
 int peekfs_update_task(struct task_struct *task) {

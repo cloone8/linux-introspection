@@ -6,16 +6,26 @@
 #include <linux/smp.h>
 #include <linux/delay.h>
 
-#define peekfs_assert(condition) __peekfs_assert(condition, #condition, __FILE__, __LINE__)
+#define PEEKFS_DEBUG
 
-static __always_inline int __peekfs_assert(int invariant, char* message, const char* file, const int line) {
-    if(unlikely(!invariant)) {
-        mdelay(100);
-        WARN(true, "(CPU %d) ASSERTION FAILED: %s (%s:%d)", smp_processor_id(), message, file, line);
-        mdelay(100);
+#ifdef PEEKFS_DEBUG
+
+    #define peekfs_assert(condition) __peekfs_assert(condition, #condition, __FILE__, __LINE__)
+
+    static __always_inline int __peekfs_assert(int invariant, char* message, const char* file, const int line) {
+        if(unlikely(!invariant)) {
+            mdelay(100);
+            WARN(true, "(CPU %d) ASSERTION FAILED: %s (%s:%d)", smp_processor_id(), message, file, line);
+            mdelay(100);
+        }
+
+        return invariant;
     }
 
-    return invariant;
-}
+#else
+
+    #define peekfs_assert(condition) (1)
+
+#endif
 
 #endif
