@@ -22,14 +22,13 @@ static void put_pages(struct page** pages, size_t num) {
     }
 }
 
-void __user* peekfs_get_isdata_section_start(struct mm_struct* mm, elf_ehdr_t* ehdr, void __user* file_base) {
+void __user* peekfs_get_isdata_section_start(struct mm_struct* mm, elf_ehdr_t* ehdr, void __user* file_base, int* mm_locked) {
     elf_off_t section_headers_offset;
     elf_half_t num_section_headers;
     void __user* elf_sec_start_page, __user* elf_sec_end_page;
     elf_shdr_t* elf_sec_headers;
     size_t elf_sec_page_num;
     long gup_retval;
-    int mm_locked = 1;
     struct page** elf_sec_pages;
     size_t i;
 
@@ -65,11 +64,18 @@ void __user* peekfs_get_isdata_section_start(struct mm_struct* mm, elf_ehdr_t* e
 
     log_info("Getting %px -> %px for section headers (%lu pages) \n", (void*) elf_sec_start_page, (void*) elf_sec_end_page, elf_sec_page_num);
 
-    gup_retval = get_user_pages_remote(mm, (uintptr_t)elf_sec_start_page, elf_sec_page_num, 0, elf_sec_pages, NULL, &mm_locked);
+    gup_retval = get_user_pages_remote(mm, (uintptr_t)elf_sec_start_page, elf_sec_page_num, 0, elf_sec_pages, NULL, mm_locked);
 
-    if(!mm_locked) {
+    if(unlikely(!(*mm_locked))) {
         // If something went wrong and the lock was left unlocked, re-lock it
-        mmap_read_lock(mm);
+        if(unlikely(mmap_read_lock_killable(mm))) {
+            if(gup_retval > 0) {
+                put_pages(elf_sec_pages, gup_retval);
+            }
+
+            return ERR_PTR(-EINTR);
+        }
+        *mm_locked = 1;
     }
 
     if(unlikely(gup_retval < 0)) {

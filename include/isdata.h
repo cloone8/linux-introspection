@@ -1,5 +1,5 @@
-#ifndef __ISDATA_H__
-#define __ISDATA_H__
+#ifndef __PEEKFS_ISDATA_H__
+#define __PEEKFS_ISDATA_H__
 
 #include <linux/kernel.h>
 #include <linux/elf.h>
@@ -30,7 +30,7 @@ static inline int ehdr_arch_compatible(elf_ehdr_t* ehdr) {
     return ehdr->e_ident[EI_CLASS] == ELF_CLASS && ehdr->e_ident[EI_DATA] == ELF_DATA;
 }
 
-void __user* peekfs_get_isdata_section_start(struct mm_struct* mm, elf_ehdr_t* ehdr, void __user* file_base);
+void __user* peekfs_get_isdata_section_start(struct mm_struct* mm, elf_ehdr_t* ehdr, void __user* file_base, int* mm_locked);
 int peekfs_parse_isdata_sections(struct peekable_process* peekable, struct list_head* isdata_sections, struct mm_struct* mm);
 
 #endif
