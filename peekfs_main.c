@@ -6,6 +6,7 @@
 #include <linux/proc_fs.h>
 #include <linux/sched.h>
 #include <linux/rcupdate.h>
+#include <linux/pid.h>
 #include <linux/smp.h>
 #include <linux/kprobes.h>
 
@@ -17,29 +18,17 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PeekFS introspection filesystem");
 
 // Some bookkeeping, useful for debugging
-static atomic64_t num_handlers = ATOMIC_INIT(0);
-static atomic64_t num_fork = ATOMIC_INIT(0);
-static atomic64_t num_exec = ATOMIC_INIT(0);
-static atomic64_t num_exit = ATOMIC_INIT(0);
 static atomic64_t num_active = ATOMIC_INIT(0);
 
 // ProcFS related vars
 struct proc_dir_entry* proc_main;
 
 // Kprobe related vars
-static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
 static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
 static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
 
 struct krp_data {
 
-};
-
-static struct kretprobe krp_fork = {
-    .kp.symbol_name = "copy_process",
-    .handler = krp_fork_handler,
-    .data_size = sizeof(struct krp_data),
-    .maxactive = 2 * NR_CPUS
 };
 
 static struct kretprobe krp_exec = {
@@ -71,97 +60,131 @@ static struct kretprobe krp_exit = {
 //     .proc_write = mywrite
 // };
 
-static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
-    struct task_struct* forked_task;
-    char cur_task_name[TASK_COMM_LEN];
-    char forked_task_name[TASK_COMM_LEN];
-    s64 my_num_handlers = atomic64_add_return(1, &num_handlers);
-    s64 my_num_fork = atomic64_add_return(1, &num_fork);
+static ssize_t register_write(struct file* file, const char __user* buffer, size_t count, loff_t* f_pos) {
+    long retval;
+    struct pid* pid;
+    void __user* module_hdr;
 
-    atomic64_inc(&num_active);
+    log_info("User writing %lu bytes to register file\n", count);
 
-    rcu_read_lock();
-
-    get_task_comm(cur_task_name, current);
-
-    log_info("Fork handler called in %s with pid %d in CPU %d %lld:%lld\n", cur_task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_fork);
-
-    forked_task = (struct task_struct*) regs_return_value(regs);
-
-    if(unlikely(IS_ERR(forked_task))) {
-        log_info("Forking pid %d failed (%ld), handler doing nothing\n", current->pid, PTR_ERR(forked_task));
-    } else {
-        get_task_comm(forked_task_name, forked_task);
-
-        log_info("Forking pid %d to %d in CPU %d %lld:%lld\n", current->pid, forked_task->pid, smp_processor_id(), my_num_handlers, my_num_fork);
-
-        // Not the current task, who knows what's going on with it and who else is scheduling it. Let's make sure
-        // it doesn't get cleaned
-        get_task_struct(forked_task);
-
-        if(peekfs_add_task(forked_task) != 0) {
-            log_warn("Could not add task %s with pid %d to peekable task list in CPU %d %lld:%lld\n", forked_task_name, forked_task->pid, smp_processor_id(), my_num_handlers, my_num_fork);
-        }
-
-        put_task_struct(forked_task);
+    if(count != (sizeof(void*) + 1)) {
+        // User must write exactly one pointer
+        return -EINVAL;
     }
 
-    log_info("Fork handler done in %s with pid %d in CPU %d %lld:%lld\n", cur_task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_fork);
+    if(unlikely(copy_from_user(&module_hdr, buffer, sizeof(void*)))) {
+        return -EFAULT;
+    }
 
-    rcu_read_unlock();
-    atomic64_dec(&num_active);
-    return 0;
+    pid = find_get_pid(current->pid);
+
+    if(unlikely(!pid)) {
+        return -ESRCH;
+    }
+
+    retval = peekfs_register_module(pid, module_hdr);
+
+    put_pid(pid);
+
+
+    if(unlikely(retval != 0)) {
+        return retval;
+    }
+
+    return sizeof(void*);
 }
 
-static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
-    char task_name[TASK_COMM_LEN] = {0};
-    s64 my_num_handlers = atomic64_add_return(1, &num_handlers);
-    s64 my_num_exec = atomic64_add_return(1, &num_exec);
-    atomic64_inc(&num_active);
+static struct proc_ops register_ops = {
+    .proc_write = register_write
+};
 
-    rcu_read_lock();
+static ssize_t unregister_write(struct file* file, const char __user* buffer, size_t count, loff_t* f_pos) {
+    long retval;
+    struct pid* pid;
+    void __user* module_hdr;
 
-    get_task_comm(task_name, current);
+    log_info("User writing %lu bytes to unregister file\n", count);
 
-    log_info("Exec handler for %s with pid %d in CPU %d %lld:%lld\n", task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
-
-    if(unlikely(fatal_signal_pending(current))) {
-        // Something went wrong during exec, skip the handler
-        log_info("Error during exec call for %s with pid %d, skipping handler\n", task_name, current->pid);
-    } else {
-        if(peekfs_update_task(current) != 0) {
-            log_warn("Could not update task %s with pid %d in peekable task list in CPU %d %lld:%lld\n", task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
-        }
+    if(count != (sizeof(void*) + 1)) {
+        // User must write exactly one pointer
+        return -EINVAL;
     }
 
-    log_info("Exec handler done for %s with pid %d in CPU %d %lld:%lld\n", task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_exec);
+    if(unlikely(copy_from_user(&module_hdr, buffer, sizeof(void*)))) {
+        return -EFAULT;
+    }
 
-    rcu_read_unlock();
+    pid = find_get_pid(current->pid);
 
+    if(unlikely(!pid)) {
+        return -ESRCH;
+    }
+
+    retval = peekfs_remove_module(pid, module_hdr);
+
+    if(unlikely(retval != 0)) {
+        return retval;
+    }
+
+    return sizeof(void*);
+}
+
+static struct proc_ops unregister_ops = {
+    .proc_write = unregister_write
+};
+
+static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
+    long retval;
+    struct pid* pid;
+    char task_name[TASK_COMM_LEN] = {0};
+    atomic64_inc(&num_active);
+
+    get_task_comm(task_name, current);
+    pid = find_get_pid(current->pid);
+
+    if(unlikely(!pid)) {
+        log_warn("Couldn't get local PID for PID %d\n", current->pid);
+        goto ret;
+    }
+
+    log_info("Exec handler for %s with pid %d in CPU %d\n", task_name, pid_nr(pid), smp_processor_id());
+
+    retval = peekfs_remove_task_by_pid(pid);
+
+    if(unlikely(retval != 0)) {
+        log_err("Error trying to remove process %d from peekable process list\n", pid_nr(pid));
+    }
+
+    put_pid(pid);
+ret:
     atomic64_dec(&num_active);
     return 0;
 }
 
 static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
+    long retval;
+    struct pid* pid;
     char task_name[TASK_COMM_LEN] = {0};
-    s64 my_num_handlers = atomic64_add_return(1, &num_handlers);
-    s64 my_num_exit = atomic64_add_return(1, &num_exit);
     atomic64_inc(&num_active);
 
-    rcu_read_lock();
-
     get_task_comm(task_name, current);
+    pid = find_get_pid(current->pid);
 
-    log_info("Exit handler for %s with pid %d in CPU %d %lld:%lld\n", task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
-
-    if(peekfs_remove_task_by_pid(current->pid) != 0) {
-        log_warn("Could not remove task %s with pid %d from peekable task list in CPU %d %lld:%lld\n", task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
+    if(unlikely(!pid)) {
+        log_warn("Couldn't get local PID for PID %d\n", current->pid);
+        goto ret;
     }
 
-    log_info("Exit handler done for %s with pid %d in CPU %d %lld:%lld\n", task_name, current->pid, smp_processor_id(), my_num_handlers, my_num_exit);
+    log_info("Exit handler for %s with pid %d in CPU %d\n", task_name, pid_nr(pid), smp_processor_id());
 
-    rcu_read_unlock();
+    retval = peekfs_remove_task_by_pid(pid);
 
+    if(unlikely(retval != 0)) {
+        log_err("Error trying to remove process %d from peekable process list\n", pid_nr(pid));
+    }
+
+    put_pid(pid);
+ret:
     atomic64_dec(&num_active);
     return 0;
 }
@@ -176,13 +199,6 @@ static int peekfs_register_kprobes(void) {
         goto err_register_kprobes_exit;
     }
 
-    retval = register_kretprobe(&krp_fork);
-
-    if(retval < 0) {
-        log_info("Registering fork kretprobe failed, returned %d\n", retval);
-        goto err_register_kprobes_fork;
-    }
-
     retval = register_kretprobe(&krp_exec);
 
     if(retval < 0) {
@@ -194,8 +210,6 @@ static int peekfs_register_kprobes(void) {
     // Normally unreachable cleanup routines
     unregister_kretprobe(&krp_exec);
 err_register_kprobes_exec:
-    unregister_kretprobe(&krp_fork);
-err_register_kprobes_fork:
     unregister_kretprobe(&krp_exit);
 err_register_kprobes_exit:
     return retval;
@@ -203,12 +217,12 @@ err_register_kprobes_exit:
 
 static void peekfs_remove_kprobes(void) {
     unregister_kretprobe(&krp_exit);
-    unregister_kretprobe(&krp_fork);
     unregister_kretprobe(&krp_exec);
 }
 
 static int __init peekfs_init(void) {
     int retval = 0;
+    struct proc_dir_entry *proc_unregister, *proc_register;
 
     log_info("Initializing PeekFS\n");
 
@@ -221,14 +235,23 @@ static int __init peekfs_init(void) {
         goto err_proc_mkdir;
     }
 
-    // Do the initial peekable task list initialization
-    log_info("Initializing peekable task list\n");
-    if(unlikely((retval = peekfs_refresh_task_list()) != 0)) {
-        log_err("Could not initialize the peekable task list\n");
-        goto err_init_task_list;
+    log_info("Initializing deregistration proc file\n");
+    proc_unregister = proc_create("unregister", 0222, proc_main, &unregister_ops);
+
+    if(unlikely(!proc_unregister)) {
+        log_err("Error creating deregistration file\n");
+        retval = -EIO;
+        goto err_proc_unregister;
     }
 
-    // Register the kprobes
+    log_info("Initializing registration proc file\n");
+    proc_register = proc_create("register", 0222, proc_main, &register_ops);
+    if(unlikely(!proc_register)) {
+        log_err("Error creating registration file\n");
+        retval = -EIO;
+        goto err_proc_register;
+    }
+
     log_info("Registering kprobes\n");
     if(unlikely((retval = peekfs_register_kprobes()) != 0)) {
         log_err("Could not register kprobes\n");
@@ -242,10 +265,11 @@ static int __init peekfs_init(void) {
 
 err_register_kprobes:
     peekfs_clear_task_list();
-
-err_init_task_list:
+    proc_remove(proc_register);
+err_proc_register:
+    proc_remove(proc_unregister);
+err_proc_unregister:
     proc_remove(proc_main);
-
 err_proc_mkdir:
     return retval;
 }
