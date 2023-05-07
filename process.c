@@ -19,13 +19,13 @@ static DECLARE_RWSEM(peekable_process_list_rwsem);
 
 // Pre-define internal functions
 static struct peekable_process *create_peekable_process(struct pid* pid);
-static struct peekable_module *create_peekable_module(struct pid* pid, void __user* isdata_header);
+static struct peekable_module *create_peekable_module(struct peekable_process *owner, void __user* isdata_header);
 static struct peekable_process *find_process_in_list(struct pid* pid);
 static void remove_peekable_module(struct peekable_process *owner, struct peekable_module *module);
 static void remove_peekable_process(struct peekable_process *process);
 static void clear_peekable_processes(void);
 
-static struct peekable_module *create_peekable_module(struct pid* pid, void __user* isdata_header) {
+static struct peekable_module *create_peekable_module(struct peekable_process *owner, void __user* isdata_header) {
     // TODO: Something
 
     return 0;
@@ -201,7 +201,7 @@ long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
     }
 
     // Now let's add the module
-    new_module = create_peekable_module(pid, module_hdr);
+    new_module = create_peekable_module(module_owner, module_hdr);
 
     if(unlikely(IS_ERR(new_module))) {
         to_ret = PTR_ERR(new_module);
