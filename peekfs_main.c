@@ -86,7 +86,7 @@ static ssize_t register_write(struct file* file, const char __user* buffer, size
 
     put_pid(pid);
 
-    if(unlikely(retval != 0)) {
+    if(unlikely(retval < 0)) {
         return retval;
     }
 

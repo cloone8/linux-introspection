@@ -126,6 +126,7 @@ static void clear_peekable_processes(void) {
 
     list_for_each_safe(cur, next, &peekable_process_list) {
         struct peekable_process *task = container_of(cur, struct peekable_process, list);
+        // TODO: Lock process being cleared
         remove_peekable_process(task);
     }
 }
@@ -157,6 +158,7 @@ long peekfs_remove_task_by_pid(struct pid* pid) {
             return 0;
         }
 
+        // TODO: Lock process being cleared
         remove_peekable_process(process);
 
         up_write(&peekable_process_list_rwsem);
@@ -217,6 +219,7 @@ long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
 ret_unlock_all:
     up_write(&module_owner->lock);
 ret_unlock_list:
+    // TODO: We can probably unlock this a whole lot earlier
     up_write(&peekable_process_list_rwsem);
     return to_ret;
 }
