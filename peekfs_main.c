@@ -67,7 +67,7 @@ static ssize_t register_write(struct file* file, const char __user* buffer, size
 
     log_info("User writing %lu bytes to register file\n", count);
 
-    if(count != (sizeof(void*) + 1)) {
+    if(count != sizeof(void*)) {
         // User must write exactly one pointer
         return -EINVAL;
     }
@@ -85,7 +85,6 @@ static ssize_t register_write(struct file* file, const char __user* buffer, size
     retval = peekfs_register_module(pid, module_hdr);
 
     put_pid(pid);
-
 
     if(unlikely(retval != 0)) {
         return retval;
@@ -105,7 +104,7 @@ static ssize_t unregister_write(struct file* file, const char __user* buffer, si
 
     log_info("User writing %lu bytes to unregister file\n", count);
 
-    if(count != (sizeof(void*) + 1)) {
+    if(count != sizeof(void*)) {
         // User must write exactly one pointer
         return -EINVAL;
     }
