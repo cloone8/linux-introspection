@@ -1,31 +1,45 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/fs.h>
+#include <linux/pid.h>
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
+#include <linux/rwsem.h>
 
 #include <peekfs.h>
+#include <process.h>
 #include <peek_ops.h>
 
 static ssize_t read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
-    static int finished = 0;
     unsigned long retval;
-    char hello[] = "Hello reader!";
-    size_t len = min(count, sizeof(hello));
+    struct inode* this_inode;
+    struct peekable_module* mod_info;
+    struct peekable_process* process;
+    struct pid* pid;
+    void __user* data_pointer;
+    size_t to_read;
 
-    if(finished) {
-        return 0;
+    this_inode = file_inode(file);
+    data_pointer = pde_data(this_inode);
+    mod_info = proc_get_parent_data(this_inode);
+    pid = mod_info->owner;
+    process = peekfs_get_process(pid, 0);
+
+    if(unlikely(IS_ERR(process))) {
+        return PTR_ERR(process);
     }
 
-    retval = copy_to_user(buf, hello, len);
+    if(unlikely(!process)) {
+        return -ESRCH;
+    }
+
+    // to_read = min(count, )
+
+    // retval = copy_to_user(buf, hello, len);
 
     if(retval) {
         return -EFAULT;
     }
-
-    finished = 1;
-
-    return len;
 }
 
 /*
@@ -50,7 +64,7 @@ static int close_handler(struct inode *inode, struct file *file) {
 static struct proc_ops _peek_ops = {
     .proc_read = read_handler,
     .proc_open = open_handler,
-    .proc_release = close_handler
+    .proc_release = close_handler,
 };
 
 struct proc_ops* peek_ops = &_peek_ops;

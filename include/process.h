@@ -1,6 +1,7 @@
 #ifndef __PEEKFS_PROCESS_H__
 #define __PEEKFS_PROCESS_H__
 
+#include <linux/list.h>
 #include <linux/rwsem.h>
 #include <linux/pid.h>
 
@@ -29,5 +30,6 @@ long peekfs_clear_task_list(void);
 long peekfs_register_module(struct pid* pid, void __user* module_hdr);
 long peekfs_remove_module(struct pid* pid, void __user* module_hdr);
 long peekfs_remove_task_by_pid(struct pid* pid);
+struct peekable_process* peekfs_get_process(struct pid* pid, int access);
 
 #endif

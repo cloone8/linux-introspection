@@ -228,6 +228,37 @@ static void clear_peekable_processes(void) {
 }
 
 /**
+ * Set access to 0 for read-only, 1 for write
+*/
+struct peekable_process* peekfs_get_process(struct pid* pid, int access) {
+    struct peekable_process* to_ret;
+
+    if(unlikely(down_read_killable(&peekable_process_list_rwsem))) {
+        return ERR_PTR(-EINTR);
+    }
+
+    to_ret = find_process_in_list(pid);
+
+    if(likely(to_ret)) {
+        if(access) {
+            if(unlikely(down_write_killable(&to_ret->lock))) {
+                up_read(&peekable_process_list_rwsem);
+                return ERR_PTR(-EINTR);
+            }
+        } else {
+            if(unlikely(down_read_killable(&to_ret->lock))) {
+                up_read(&peekable_process_list_rwsem);
+                return ERR_PTR(-EINTR);
+            }
+        }
+    }
+
+    up_read(&peekable_process_list_rwsem);
+
+    return to_ret;
+}
+
+/**
  * Tries to remove the peekable process with the given PID.
  * Returns 1 if the process was found and removed, 0 if no process was found
  * and a -ERRVAL if an error was encountered.

@@ -2,6 +2,7 @@
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
+#include <isdata-headers/peekfs_meta_headers.h>
 
 #include <peekfs.h>
 #include <process.h>
@@ -23,7 +24,7 @@ struct peekable_module* parse_isdata_header(
 
     if(unlikely(mod_hdr->name_len > PEEKFS_HUGEBUFSIZE)) {
         // Otherwise we run the risk of allocating insane amounts of memory
-        log_err("Module name too large: %llu bytes\n", mod_hdr->name_len);
+        log_err("Module name too large: %u bytes\n", mod_hdr->name_len);
         return ERR_PTR(-E2BIG);
     }
 
@@ -102,7 +103,7 @@ long parse_isdata_entries(
         struct isdata_entry* entry = entries + i;
 
         if(unlikely(entry->name_len > PEEKFS_HUGEBUFSIZE)) {
-            log_err("Entry name in module %s too large: %llu\n", module->name, entry->name_len);
+            log_err("Entry name in module %s too large: %u\n", module->name, entry->name_len);
             to_ret = -E2BIG;
             goto ret;
         }
@@ -131,6 +132,8 @@ long parse_isdata_entries(
             to_ret = -EIO;
             goto ret;
         }
+
+        proc_set_size(created_entry, entry->size);
 
         kfree(entry_name);
     }
