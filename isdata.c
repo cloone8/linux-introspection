@@ -2,7 +2,7 @@
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
-#include <isdata-headers/peekfs_meta_headers.h>
+#include <isdata-headers/isdata_meta.h>
 
 #include <peekfs.h>
 #include <process.h>

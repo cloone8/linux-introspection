@@ -2,7 +2,7 @@
 #define __PEEKFS_ISDATA_H__
 
 #include <linux/kernel.h>
-#include <isdata-headers/peekfs_meta_headers.h>
+#include <isdata-headers/isdata_meta.h>
 
 DEFINE_ISDATA_MAGIC_BYTES(isdata_magic_bytes);
 #define ISDATA_MAGIC_BYTES_LEN (sizeof(isdata_magic_bytes))
