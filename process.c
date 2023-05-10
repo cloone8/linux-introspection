@@ -2,9 +2,11 @@
 #include <linux/rwsem.h>
 #include <linux/slab.h>
 #include <linux/list.h>
+#include <linux/mm.h>
 #include <linux/pid.h>
 #include <linux/proc_fs.h>
-#include <linux/sched/task.h>
+#include <linux/sched.h>
+#include <linux/sched/mm.h>
 
 #include <process.h>
 #include <peekfs.h>
@@ -25,16 +27,85 @@ static void remove_peekable_module(struct peekable_process *owner, struct peekab
 static void remove_peekable_process(struct peekable_process *process);
 static void clear_peekable_processes(void);
 
-static struct peekable_module *create_peekable_module(struct peekable_process *owner, void __user* isdata_header) {
-    // TODO: Something
 
-    return 0;
+/**
+ * Requires the owner write-lock to be held
+ */
+static struct peekable_module *create_peekable_module(struct peekable_process *owner, void __user* isdata_header) {
+    struct peekable_module* new_module, *to_ret;
+    struct task_struct* owner_task;
+    struct mm_struct* mm;
+    int mm_locked = 0;
+    struct isdata_module mod_hdr;
+    long retval;
+
+    owner_task = get_pid_task(owner->pid, PIDTYPE_PID);
+
+    if(unlikely(!owner_task)) {
+        return ERR_PTR(-ESRCH);
+    }
+
+    mm = get_task_mm(owner_task);
+
+    if(unlikely(!mm)) {
+        to_ret = ERR_PTR(-ENXIO);
+        goto ret_put_task;
+    }
+
+    if(unlikely(mmap_read_lock_killable(mm))) {
+        to_ret = ERR_PTR(-EINTR);
+        goto ret_put_mm;
+    }
+
+    mm_locked = 1;
+
+    retval = copy_data_from_userspace(mm, isdata_header, &mod_hdr, sizeof(struct isdata_module), &mm_locked);
+
+    if(unlikely(retval != 0)) {
+        to_ret = ERR_PTR(retval);
+        goto ret_unlock;
+    }
+
+    if(unlikely(memcmp(isdata_magic_bytes, mod_hdr.magic, ISDATA_MAGIC_BYTES_LEN) != 0)) {
+        log_err("Process %d tried to register, but no module header was found\n", pid_nr(owner->pid));
+        to_ret = ERR_PTR(-EINVAL);
+        goto ret_unlock;
+    }
+
+    new_module = parse_isdata_header(owner, isdata_header, mm, &mod_hdr, &mm_locked);
+
+    if(unlikely(IS_ERR(new_module))) {
+        log_err("Error parsing isdata header in process %d: %ld\n", pid_nr(owner->pid), PTR_ERR(new_module));
+        to_ret = new_module;
+        goto ret_unlock;
+    }
+
+    retval = parse_isdata_entries(owner, new_module, mm, &mod_hdr, &mm_locked);
+
+    if(unlikely(retval < 0)) {
+        log_err("Error parsing entries from isdata header in process %d and module %s: %ld\n", pid_nr(owner->pid), new_module->name, retval);
+        remove_peekable_module(owner, new_module);
+        to_ret = ERR_PTR(retval);
+        goto ret_unlock;
+    }
+
+ret_unlock:
+    if(mm_locked) {
+        mmap_read_unlock(mm);
+    }
+ret_put_mm:
+    mmput(mm);
+ret_put_task:
+    put_task_struct(owner_task);
+    return to_ret;
 }
 
 /**
  * Returns a new peekable process and initializes it. The process is returned with the
  * lock in a write-locked state, so the caller can freely modify it without other processes
  * making use of the new peekable proc already.
+ *
+ * Requires the list-write lock to be held
  */
 static struct peekable_process *create_peekable_process(struct pid* pid) {
     char name_buf[PEEKFS_SMALLBUFSIZE] = {0};
@@ -49,7 +120,7 @@ static struct peekable_process *create_peekable_process(struct pid* pid) {
         return ERR_PTR(-E2BIG);
     }
 
-    task_entry = proc_mkdir(name_buf, proc_main);
+    task_entry = proc_mkdir_data(name_buf, 0555, proc_main, pid);
 
     if(unlikely(task_entry == NULL)) {
         log_err("Could not create proc entry for task\n");
@@ -80,6 +151,11 @@ static struct peekable_process *create_peekable_process(struct pid* pid) {
     return new_entry;
 }
 
+/**
+ * Finds a process in the list by PID.
+ *
+ * Requires the list read-lock to be held
+*/
 static struct peekable_process *find_process_in_list(struct pid* pid) {
     struct list_head *node;
 
@@ -94,6 +170,11 @@ static struct peekable_process *find_process_in_list(struct pid* pid) {
     return NULL;
 }
 
+/**
+ * Removes a peekable module from the given process.
+ *
+ * Requires the owner write-lock to be held
+ */
 static void remove_peekable_module(struct peekable_process *owner, struct peekable_module *module) {
     peekfs_assert(module != NULL);
     peekfs_assert(owner != NULL);
@@ -101,33 +182,48 @@ static void remove_peekable_module(struct peekable_process *owner, struct peekab
 
     list_del(&module->list);
     proc_remove(module->proc_entry);
+    kfree(module->name);
     kfree(module);
 }
 
+/**
+ * Removes a peekable process from the list
+ *
+ * Requires the process-write lock and the list-write lock to be held
+*/
 static void remove_peekable_process(struct peekable_process *process) {
     struct list_head *cur, *next;
     peekfs_assert(process != NULL);
     peekfs_assert(!list_entry_is_head(process, &peekable_process_list, list));
 
+    // Do this first, so the process cannot be found anymore
     list_for_each_safe(cur, next, &process->peekable_modules) {
         struct peekable_module *module = container_of(cur, struct peekable_module, list);
         remove_peekable_module(process, module);
     }
 
     list_del(&process->list);
+
     proc_remove(process->proc_entry);
 
     put_pid(process->pid);
     kfree(process);
 }
 
+/**
+ * Clears all peekable processes.
+ *
+ * Requires the list-write lock to be held, and locks all processes
+ * at some point
+ */
 static void clear_peekable_processes(void) {
     struct list_head *cur, *next;
 
     list_for_each_safe(cur, next, &peekable_process_list) {
         struct peekable_process *task = container_of(cur, struct peekable_process, list);
-        // TODO: Lock process being cleared
+        down_write(&task->lock);
         remove_peekable_process(task);
+        // Don't unlock, because the task is gone
     }
 }
 
@@ -142,39 +238,39 @@ long peekfs_remove_task_by_pid(struct pid* pid) {
     down_read(&peekable_process_list_rwsem);
 
     process = find_process_in_list(pid);
+    up_read(&peekable_process_list_rwsem);
 
-    if(unlikely(process != NULL)) {
-        // Okay, we know the process is peekable. Unlock, then upgrade
-        // the lock to the writable variant (and re-check whether the process is
-        // still there)
-
-        up_read(&peekable_process_list_rwsem);
-        down_write(&peekable_process_list_rwsem);
-        process = find_process_in_list(pid);
-
-        if(unlikely(process == NULL)) {
-            // Someone else deleted the process in the meantime. Just return
-            up_write(&peekable_process_list_rwsem);
-            return 0;
-        }
-
-        // TODO: Lock process being cleared
-        remove_peekable_process(process);
-
-        up_write(&peekable_process_list_rwsem);
-        return 1;
-    } else {
-
-        up_read(&peekable_process_list_rwsem);
+    if(likely(process == NULL)) {
+        // Not nearly all processes in the system are
+        // peekable, so we expect the search to turn up empty
         return 0;
     }
+
+    // Okay, we know the process is peekable. Unlock, then upgrade
+    // the lock to the writable variant (and re-check whether the process is
+    // still there)
+    down_write(&peekable_process_list_rwsem);
+    process = find_process_in_list(pid);
+
+    if(unlikely(process == NULL)) {
+        // Someone else deleted the process in the meantime. Just return
+        up_write(&peekable_process_list_rwsem);
+        return 0;
+    }
+
+    down_write(&process->lock);
+    remove_peekable_process(process);
+
+    up_write(&peekable_process_list_rwsem);
+    return 1;
+
 }
 
 long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
     struct peekable_process* module_owner;
-    int new_process;
+    int new_process_created = 0;
     struct peekable_module* new_module;
-    int to_ret = 0;
+    long to_ret = 0;
 
     if(unlikely(down_write_killable(&peekable_process_list_rwsem))) {
         return -EINTR;
@@ -183,14 +279,12 @@ long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
     module_owner = find_process_in_list(pid);
 
     if(likely(module_owner)) {
-        new_process = 0;
         // The process already exists. Lock it, and add a module to it
         if(unlikely(down_write_killable(&module_owner->lock))) {
             to_ret = -EINTR;
             goto ret_unlock_list;
         }
     } else {
-        new_process = 1;
         // Process doesn't exist. Add a new one first
         module_owner = create_peekable_process(pid);
 
@@ -199,7 +293,15 @@ long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
             goto ret_unlock_list;
         }
 
+        new_process_created = 1;
         // New processes come pre-locked, so no need to do that here
+    }
+
+    // At this point, we'll no longer need to modify the list, so we can "downgrade"
+    // to a read-only lock. This isn't possible for new processes, as they might
+    // have to be removed on-error later
+    if(likely(!new_process_created)) {
+        downgrade_write(&peekable_process_list_rwsem);
     }
 
     // Now let's add the module
@@ -208,27 +310,29 @@ long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
     if(unlikely(IS_ERR(new_module))) {
         to_ret = PTR_ERR(new_module);
 
-        if(new_process) {
+        if(unlikely(new_process_created)) {
             remove_peekable_process(module_owner);
             goto ret_unlock_list;
-        } else {
-            goto ret_unlock_all;
         }
     }
 
-ret_unlock_all:
     up_write(&module_owner->lock);
+
 ret_unlock_list:
-    // TODO: We can probably unlock this a whole lot earlier
-    up_write(&peekable_process_list_rwsem);
-    return to_ret;
+    if(likely(!new_process_created)) {
+        up_read(&peekable_process_list_rwsem);
+        return to_ret;
+    } else {
+        up_write(&peekable_process_list_rwsem);
+        return to_ret;
+    }
 }
 
 long peekfs_remove_module(struct pid* pid, void __user* module_hdr) {
-    int to_ret = 0;
-    down_write(&peekable_process_list_rwsem);
+    long to_ret = 0;
+    down_read(&peekable_process_list_rwsem);
 
-    up_write(&peekable_process_list_rwsem);
+    up_read(&peekable_process_list_rwsem);
     return to_ret;
 }
 

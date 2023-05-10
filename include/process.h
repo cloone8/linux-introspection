@@ -19,7 +19,8 @@ struct peekable_process {
 
 struct peekable_module {
     struct list_head list;
-    struct peekable_process* owner;
+    char* name;
+    struct pid* owner;
     void __user* isdata_header;
     struct proc_dir_entry* proc_entry;
 };

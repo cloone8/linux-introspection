@@ -18,7 +18,7 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PeekFS introspection filesystem");
 
 // Some bookkeeping, useful for debugging
-static atomic64_t num_active = ATOMIC_INIT(0);
+atomic64_t active_handlers = ATOMIC_INIT(0);
 
 // ProcFS related vars
 struct proc_dir_entry* proc_main;
@@ -62,24 +62,29 @@ static struct kretprobe krp_exit = {
 
 static ssize_t register_write(struct file* file, const char __user* buffer, size_t count, loff_t* f_pos) {
     long retval;
+    ssize_t to_ret;
     struct pid* pid;
     void __user* module_hdr;
+    atomic64_inc(&active_handlers);
 
     log_info("User writing %lu bytes to register file\n", count);
 
     if(count != sizeof(void*)) {
         // User must write exactly one pointer
-        return -EINVAL;
+        to_ret = -EINVAL;
+        goto ret;
     }
 
     if(unlikely(copy_from_user(&module_hdr, buffer, sizeof(void*)))) {
-        return -EFAULT;
+        to_ret = -EFAULT;
+        goto ret;
     }
 
     pid = find_get_pid(current->pid);
 
     if(unlikely(!pid)) {
-        return -ESRCH;
+        to_ret = -ESRCH;
+        goto ret;
     }
 
     retval = peekfs_register_module(pid, module_hdr);
@@ -87,10 +92,14 @@ static ssize_t register_write(struct file* file, const char __user* buffer, size
     put_pid(pid);
 
     if(unlikely(retval < 0)) {
-        return retval;
+        to_ret = retval;
+        goto ret;
     }
 
-    return sizeof(void*);
+    to_ret = sizeof(void*);
+ret:
+    atomic64_dec(&active_handlers);
+    return to_ret;
 }
 
 static struct proc_ops register_ops = {
@@ -99,33 +108,42 @@ static struct proc_ops register_ops = {
 
 static ssize_t unregister_write(struct file* file, const char __user* buffer, size_t count, loff_t* f_pos) {
     long retval;
+    ssize_t to_ret;
     struct pid* pid;
     void __user* module_hdr;
+    atomic64_inc(&active_handlers);
 
     log_info("User writing %lu bytes to unregister file\n", count);
 
     if(count != sizeof(void*)) {
         // User must write exactly one pointer
-        return -EINVAL;
+        to_ret = -EINVAL;
+        goto ret;
     }
 
     if(unlikely(copy_from_user(&module_hdr, buffer, sizeof(void*)))) {
-        return -EFAULT;
+        to_ret = -EFAULT;
+        goto ret;
     }
 
     pid = find_get_pid(current->pid);
 
     if(unlikely(!pid)) {
-        return -ESRCH;
+        to_ret = -ESRCH;
+        goto ret;
     }
 
     retval = peekfs_remove_module(pid, module_hdr);
 
     if(unlikely(retval != 0)) {
-        return retval;
+        to_ret = retval;
+        goto ret;
     }
 
-    return sizeof(void*);
+    to_ret = sizeof(void*);
+ret:
+    atomic64_dec(&active_handlers);
+    return to_ret;
 }
 
 static struct proc_ops unregister_ops = {
@@ -136,7 +154,7 @@ static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* re
     long retval;
     struct pid* pid;
     char task_name[TASK_COMM_LEN] = {0};
-    atomic64_inc(&num_active);
+    atomic64_inc(&active_handlers);
 
     get_task_comm(task_name, current);
     pid = find_get_pid(current->pid);
@@ -150,13 +168,13 @@ static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* re
 
     retval = peekfs_remove_task_by_pid(pid);
 
-    if(unlikely(retval != 0)) {
+    if(unlikely(retval < 0)) {
         log_err("Error trying to remove process %d from peekable process list\n", pid_nr(pid));
     }
 
     put_pid(pid);
 ret:
-    atomic64_dec(&num_active);
+    atomic64_dec(&active_handlers);
     return 0;
 }
 
@@ -164,7 +182,7 @@ static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* re
     long retval;
     struct pid* pid;
     char task_name[TASK_COMM_LEN] = {0};
-    atomic64_inc(&num_active);
+    atomic64_inc(&active_handlers);
 
     get_task_comm(task_name, current);
     pid = find_get_pid(current->pid);
@@ -178,13 +196,13 @@ static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* re
 
     retval = peekfs_remove_task_by_pid(pid);
 
-    if(unlikely(retval != 0)) {
+    if(unlikely(retval < 0)) {
         log_err("Error trying to remove process %d from peekable process list\n", pid_nr(pid));
     }
 
     put_pid(pid);
 ret:
-    atomic64_dec(&num_active);
+    atomic64_dec(&active_handlers);
     return 0;
 }
 
@@ -280,21 +298,21 @@ static void __exit peekfs_exit(void) {
     log_info("Removing kprobes\n");
     peekfs_remove_kprobes();
 
-    log_info("Waiting for all current handlers to exit: %lld\n", atomic64_read(&num_active));
+    log_info("Destroying peekable task list\n");
+    peekfs_clear_task_list();
 
-    while((handlers_active = atomic64_read(&num_active)) > 0) {
+    log_info("Destroying proc filesystem\n");
+    proc_remove(proc_main);
+
+    log_info("Waiting for all current handlers to exit: %lld\n", atomic64_read(&active_handlers));
+
+    while((handlers_active = atomic64_read(&active_handlers)) > 0) {
         log_info("Waiting for %lld...\n", handlers_active);
         mdelay(500);
     }
 
     log_info("All handlers done\n");
 
-    log_info("Destroying peekable task list\n");
-
-    peekfs_clear_task_list();
-    log_info("Destroying proc filesystem\n");
-
-    proc_remove(proc_main);
     log_info("Cleanup done, exiting PeekFS\n");
 }
 
