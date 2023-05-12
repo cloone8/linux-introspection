@@ -13,7 +13,7 @@
 #include <isdata.h>
 #include <debug.h>
 #include <log.h>
-#include <util.h>
+#include <memutil.h>
 
 static LIST_HEAD(peekable_process_list);
 

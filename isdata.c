@@ -6,7 +6,7 @@
 
 #include <peekfs.h>
 #include <process.h>
-#include <util.h>
+#include <memutil.h>
 #include <log.h>
 #include <peek_ops.h>
 #include <isdata.h>
@@ -159,6 +159,25 @@ long parse_isdata_entries(
             for(array_elem = 0; array_elem < entry->num_elems; array_elem++) {
                 struct proc_dir_entry* array_elem_entry;
                 char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
+                umode_t perms;
+                struct vm_area_struct* vma;
+                // TODO: Can we do this VMA lookup once for the entire array? Is the assumption
+                // that the array falls within one VMA correct?
+                vma = vma_lookup(mm, (uintptr_t) new_global->addr + (array_elem * entry->size));
+
+                if(likely(vma)) {
+                    perms = 0000;
+                    if(likely(vma->vm_flags & VM_READ)) {
+                        perms += 0444;
+                    }
+
+                    if(vma->vm_flags & VM_WRITE) {
+                        perms += 0222;
+                    }
+                } else {
+                    log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size));
+                    perms = 0444;
+                }
 
                 if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%llu", array_elem) >= PEEKFS_SMALLBUFSIZE)) {
                     log_err("Array index too high: %llu\n", array_elem);
@@ -169,7 +188,7 @@ long parse_isdata_entries(
                     goto ret;
                 }
 
-                array_elem_entry = proc_create_data(elem_name, 0444, new_global->proc_entry, &peek_ops_array, (void*)array_elem);
+                array_elem_entry = proc_create_data(elem_name, perms, new_global->proc_entry, &peek_ops_array, (void*)array_elem);
 
                 if(unlikely(!array_elem_entry)) {
                     log_err("Array entry could not be created: %llu\n", array_elem);
@@ -183,7 +202,25 @@ long parse_isdata_entries(
                 proc_set_size(array_elem_entry, entry->size);
             }
         } else {
-            new_global->proc_entry = proc_create_data(entry_name, 0444, module->proc_entry, &peek_ops_single, new_global);
+            umode_t perms;
+            struct vm_area_struct* vma;
+            vma = vma_lookup(mm, (uintptr_t) new_global->addr);
+
+            if(likely(vma)) {
+                perms = 0000;
+                if(likely(vma->vm_flags & VM_READ)) {
+                    perms += 0444;
+                }
+
+                if(vma->vm_flags & VM_WRITE) {
+                    perms += 0222;
+                }
+            } else {
+                log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr);
+                perms = 0444;
+            }
+
+            new_global->proc_entry = proc_create_data(entry_name, perms, module->proc_entry, &peek_ops_single, new_global);
 
             if(unlikely(!new_global->proc_entry)) {
                 log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(owner->pid), module->name);

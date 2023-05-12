@@ -3,7 +3,7 @@
 #include <linux/vmalloc.h>
 #include <linux/string.h>
 
-#include <util.h>
+#include <memutil.h>
 #include <peekfs.h>
 #include <log.h>
 
@@ -15,6 +15,7 @@ static void put_pages(struct page** pages, size_t num) {
     }
 }
 
+// TODO: Break up into functions
 long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
     uintptr_t pages_start, pages_end;
     size_t num_pages, offset_from_requested;
@@ -84,5 +85,10 @@ long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void*
     put_pages(pages, num_pages);
     kfree(pages);
 
+    return 0;
+}
+
+long copy_data_to_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
+    // TODO: Implement
     return 0;
 }

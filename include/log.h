@@ -4,6 +4,7 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 
+// TODO: Remove this after resolving TODO in debug.h
 #include <debug.h>
 
 #ifdef PEEKFS_DEBUG

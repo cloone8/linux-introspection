@@ -6,6 +6,7 @@
 #include <linux/smp.h>
 #include <linux/delay.h>
 
+//TODO: Add this to makefile instead
 #define PEEKFS_DEBUG
 
 #ifdef PEEKFS_DEBUG
