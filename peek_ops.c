@@ -14,11 +14,20 @@
 #include <util.h>
 #include <log.h>
 
-static ssize_t read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
+static ssize_t read_handler(
+    // Start of normal proc_read handler params
+    struct file* file,
+    char __user* buf,
+    size_t count,
+    loff_t* offset,
+    // End of normal proc_read handler params, custom params here
+    struct peekable_global* entry,
+    size_t elem
+) {
     ssize_t to_ret = 0;
     long retval;
+    void* addr_to_read;
     size_t bytes_to_read;
-    struct peekable_global* entry;
     struct peekable_process* process;
     struct task_struct* process_task;
     struct mm_struct* mm;
@@ -26,7 +35,6 @@ static ssize_t read_handler(struct file* file, char __user* buf, size_t count, l
     int mm_locked = 0;
 
     // Let's find out what variable and what process has been read
-    entry = pde_data(file_inode(file));
     process = peekfs_get_process(entry->owner_pid, 0);
 
     if(unlikely(IS_ERR(process))) {
@@ -88,6 +96,7 @@ static ssize_t read_handler(struct file* file, char __user* buf, size_t count, l
         goto ret_no_free_kbuf;
     }
 
+    addr_to_read = (void*) (((uintptr_t) entry->addr) + (entry->size * elem) + (*offset));
     bytes_to_read = min(count, (entry->size - (size_t)(*offset)));
     kernel_userdata_buf = kmalloc(bytes_to_read, GFP_KERNEL);
 
@@ -96,7 +105,7 @@ static ssize_t read_handler(struct file* file, char __user* buf, size_t count, l
         goto ret_no_free_kbuf;
     }
 
-    retval = copy_data_from_userspace(mm, entry->addr + (*offset), kernel_userdata_buf, bytes_to_read, &mm_locked);
+    retval = copy_data_from_userspace(mm, addr_to_read, kernel_userdata_buf, bytes_to_read, &mm_locked);
 
     if(unlikely(retval < 0)) {
         log_err("Could not retrieve introspected global data: %ld\n", retval);
@@ -152,10 +161,22 @@ static int close_handler(struct inode *inode, struct file *file) {
 	return 0;
 }
 
-static struct proc_ops _peek_ops = {
-    .proc_read = read_handler,
+static ssize_t array_read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
+    return read_handler(file, buf, count, offset, proc_get_parent_data(file_inode(file)), (size_t)pde_data(file_inode(file)));
+}
+
+static ssize_t single_read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
+    return read_handler(file, buf, count, offset, pde_data(file_inode(file)), 0);
+}
+
+struct proc_ops peek_ops_single = {
+    .proc_read = single_read_handler,
     .proc_open = open_handler,
     .proc_release = close_handler,
 };
 
-struct proc_ops* peek_ops = &_peek_ops;
+struct proc_ops peek_ops_array = {
+    .proc_read = array_read_handler,
+    .proc_open = open_handler,
+    .proc_release = close_handler,
+};

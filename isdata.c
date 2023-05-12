@@ -137,17 +137,60 @@ long parse_isdata_entries(
         new_global->addr = entry->addr;
         new_global->owner_pid = module->owner_pid;
         new_global->size = entry->size;
-        new_global->proc_entry = proc_create_data(entry_name, 0444, module->proc_entry, peek_ops, new_global);
 
-        if(unlikely(!new_global->proc_entry)) {
-            log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(owner->pid), module->name);
-            kfree(entry_name);
-            kfree(new_global);
-            to_ret = -EIO;
-            goto ret;
+        if(entry->num_elems > 1) {
+            uint64_t array_elem;
+            new_global->proc_entry = proc_mkdir_data(entry_name, 0555, module->proc_entry, new_global);
+
+            if(unlikely(!new_global->proc_entry)) {
+                log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(owner->pid), module->name);
+                kfree(entry_name);
+                kfree(new_global);
+                to_ret = -EIO;
+                goto ret;
+            }
+
+            proc_set_size(new_global->proc_entry, entry->size * entry->num_elems);
+
+            for(array_elem = 0; array_elem < entry->num_elems; array_elem++) {
+                struct proc_dir_entry* array_elem_entry;
+                char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
+
+                if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%llu", array_elem) >= PEEKFS_SMALLBUFSIZE)) {
+                    log_err("Array index too high: %llu\n", array_elem);
+                    proc_remove(new_global->proc_entry);
+                    kfree(entry_name);
+                    kfree(new_global);
+                    to_ret = -E2BIG;
+                    goto ret;
+                }
+
+                array_elem_entry = proc_create_data(elem_name, 0444, new_global->proc_entry, &peek_ops_array, (void*)array_elem);
+
+                if(unlikely(!array_elem_entry)) {
+                    log_err("Array entry could not be created: %llu\n", array_elem);
+                    proc_remove(new_global->proc_entry);
+                    kfree(entry_name);
+                    kfree(new_global);
+                    to_ret = -EIO;
+                    goto ret;
+                }
+
+                proc_set_size(array_elem_entry, entry->size);
+            }
+        } else {
+            new_global->proc_entry = proc_create_data(entry_name, 0444, module->proc_entry, &peek_ops_single, new_global);
+
+            if(unlikely(!new_global->proc_entry)) {
+                log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(owner->pid), module->name);
+                kfree(entry_name);
+                kfree(new_global);
+                to_ret = -EIO;
+                goto ret;
+            }
+
+            proc_set_size(new_global->proc_entry, entry->size);
         }
-
-        proc_set_size(new_global->proc_entry, entry->size);
 
         list_add(&new_global->list, &module->peekable_globals);
     }

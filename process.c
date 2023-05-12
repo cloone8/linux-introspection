@@ -73,6 +73,12 @@ static struct peekable_module *create_peekable_module(struct peekable_process *o
         goto ret_unlock;
     }
 
+    if(unlikely(mod_hdr.version != ISDATA_VERSION)) {
+        log_err("Wrong isdata header version. Detected %hu but supported version is %hu\n", mod_hdr.version, ISDATA_VERSION);
+        to_ret = ERR_PTR(-EINVAL);
+        goto ret_unlock;
+    }
+
     new_module = parse_isdata_header(owner, isdata_header, mm, &mod_hdr, &mm_locked);
 
     if(unlikely(IS_ERR(new_module))) {
