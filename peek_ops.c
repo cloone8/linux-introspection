@@ -14,7 +14,8 @@
 #include <util.h>
 #include <log.h>
 
-static ssize_t read_handler(
+// TODO: Break this up into multiple functions
+static ssize_t peekfs_read_handler(
     // Start of normal proc_read handler params
     struct file* file,
     char __user* buf,
@@ -162,11 +163,11 @@ static int close_handler(struct inode *inode, struct file *file) {
 }
 
 static ssize_t array_read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
-    return read_handler(file, buf, count, offset, proc_get_parent_data(file_inode(file)), (size_t)pde_data(file_inode(file)));
+    return peekfs_read_handler(file, buf, count, offset, proc_get_parent_data(file_inode(file)), (size_t)pde_data(file_inode(file)));
 }
 
 static ssize_t single_read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
-    return read_handler(file, buf, count, offset, pde_data(file_inode(file)), 0);
+    return peekfs_read_handler(file, buf, count, offset, pde_data(file_inode(file)), 0);
 }
 
 struct proc_ops peek_ops_single = {

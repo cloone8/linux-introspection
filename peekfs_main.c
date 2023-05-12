@@ -47,21 +47,6 @@ static struct kretprobe krp_exit = {
     .maxactive = 2 * NR_CPUS
 };
 
-// static ssize_t mywrite(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos) {
-// 	printk( KERN_DEBUG "write handler\n");
-// 	return -1;
-// }
-
-// static ssize_t myread(struct file *file, char __user *ubuf, size_t count, loff_t *ppos) {
-// 	printk( KERN_DEBUG "read handle on %s\n", file->f_path.dentry->d_name.name);
-// 	return 0;
-// }
-
-// static struct proc_ops myops = {
-//     .proc_read = myread,
-//     .proc_write = mywrite
-// };
-
 static ssize_t register_write(struct file* file, const char __user* buffer, size_t count, loff_t* f_pos) {
     long retval;
     ssize_t to_ret;

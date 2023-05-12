@@ -69,6 +69,7 @@ struct peekable_module* parse_isdata_header(
     return new_module;
 }
 
+// TODO: Break this up into multiple functions
 long parse_isdata_entries(
     struct peekable_process* owner,
     struct peekable_module* module,
@@ -97,6 +98,7 @@ long parse_isdata_entries(
 
     log_info("Parsing %llu entries for module %s in process %d\n", mod_hdr->num_entries, module->name, pid_nr(owner->pid));
 
+    // TODO: Extract this for-loop body
     for(i = 0; i < mod_hdr->num_entries; i++) {
         char* entry_name;
         struct peekable_global* new_global;
@@ -138,6 +140,7 @@ long parse_isdata_entries(
         new_global->owner_pid = module->owner_pid;
         new_global->size = entry->size;
 
+        // TODO: Break up this if/else
         if(entry->num_elems > 1) {
             uint64_t array_elem;
             new_global->proc_entry = proc_mkdir_data(entry_name, 0555, module->proc_entry, new_global);
@@ -152,6 +155,7 @@ long parse_isdata_entries(
 
             proc_set_size(new_global->proc_entry, entry->size * entry->num_elems);
 
+            // TODO: Extract this for-loop body
             for(array_elem = 0; array_elem < entry->num_elems; array_elem++) {
                 struct proc_dir_entry* array_elem_entry;
                 char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
