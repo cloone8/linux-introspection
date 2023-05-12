@@ -23,6 +23,7 @@ static DECLARE_RWSEM(peekable_process_list_rwsem);
 static struct peekable_process *create_peekable_process(struct pid* pid);
 static struct peekable_module *create_peekable_module(struct peekable_process *owner, void __user* isdata_header);
 static struct peekable_process *find_process_in_list(struct pid* pid);
+static void remove_peekable_global(struct peekable_module* module, struct peekable_global* global);
 static void remove_peekable_module(struct peekable_process *owner, struct peekable_module *module);
 static void remove_peekable_process(struct peekable_process *process);
 static void clear_peekable_processes(void);
@@ -173,12 +174,35 @@ static struct peekable_process *find_process_in_list(struct pid* pid) {
 /**
  * Removes a peekable module from the given process.
  *
+ * Requires the owner peekable_process write-lock to be held
+ */
+static void remove_peekable_global(struct peekable_module* module, struct peekable_global* global) {
+    peekfs_assert(module != NULL);
+    peekfs_assert(global != NULL);
+    peekfs_assert(!list_entry_is_head(global, &module->peekable_globals, list));
+
+    list_del(&global->list);
+    proc_remove(global->proc_entry);
+    kfree(global->name);
+    kfree(global);
+}
+
+/**
+ * Removes a peekable module from the given process.
+ *
  * Requires the owner write-lock to be held
  */
 static void remove_peekable_module(struct peekable_process *owner, struct peekable_module *module) {
+    struct list_head *cur, *next;
     peekfs_assert(module != NULL);
     peekfs_assert(owner != NULL);
     peekfs_assert(!list_entry_is_head(module, &owner->peekable_modules, list));
+
+    // Do this first, so the process cannot be found anymore
+    list_for_each_safe(cur, next, &module->peekable_globals) {
+        struct peekable_global *global = container_of(cur, struct peekable_global, list);
+        remove_peekable_global(module, global);
+    }
 
     list_del(&module->list);
     proc_remove(module->proc_entry);
@@ -277,9 +301,9 @@ long peekfs_remove_task_by_pid(struct pid* pid) {
         return 0;
     }
 
-    // Okay, we know the process is peekable. Unlock, then upgrade
-    // the lock to the writable variant (and re-check whether the process is
-    // still there)
+    // Okay, we know the process is peekable. Re-acquire the lock as writable,
+    // find the process again (because the unlock might have caused someone else
+    // to delete the proceess) and delete it
     down_write(&peekable_process_list_rwsem);
     process = find_process_in_list(pid);
 

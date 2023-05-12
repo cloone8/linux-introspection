@@ -49,10 +49,11 @@ struct peekable_module* parse_isdata_header(
     }
 
     INIT_LIST_HEAD(&new_module->list);
-    new_module->owner = owner->pid;
+    INIT_LIST_HEAD(&new_module->peekable_globals);
     new_module->isdata_header = isdata_header;
     new_module->name = mod_name;
     new_module->proc_entry = proc_mkdir_data(mod_name, 0555, owner->proc_entry, new_module);
+    new_module->owner_pid = owner->pid;
 
     if(unlikely(!new_module->proc_entry)) {
         log_err("Could not register proc entry for pid %d and header %s\n", pid_nr(owner->pid), mod_name);
@@ -98,8 +99,7 @@ long parse_isdata_entries(
 
     for(i = 0; i < mod_hdr->num_entries; i++) {
         char* entry_name;
-        struct proc_dir_entry* created_entry;
-        void __user* entry_user = mod_hdr->entries + i;
+        struct peekable_global* new_global;
         struct isdata_entry* entry = entries + i;
 
         if(unlikely(entry->name_len > PEEKFS_HUGEBUFSIZE)) {
@@ -124,18 +124,32 @@ long parse_isdata_entries(
             goto ret;
         }
 
-        created_entry = proc_create_data(entry_name, 0444, module->proc_entry, peek_ops, entry_user);
+        new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
 
-        if(unlikely(!created_entry)) {
+        if(unlikely(!new_global)) {
+            kfree(entry_name);
+            to_ret = -ENOMEM;
+            goto ret;
+        }
+
+        INIT_LIST_HEAD(&new_global->list);
+        new_global->name = entry_name;
+        new_global->addr = entry->addr;
+        new_global->owner_pid = module->owner_pid;
+        new_global->size = entry->size;
+        new_global->proc_entry = proc_create_data(entry_name, 0444, module->proc_entry, peek_ops, new_global);
+
+        if(unlikely(!new_global->proc_entry)) {
             log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(owner->pid), module->name);
             kfree(entry_name);
+            kfree(new_global);
             to_ret = -EIO;
             goto ret;
         }
 
-        proc_set_size(created_entry, entry->size);
+        proc_set_size(new_global->proc_entry, entry->size);
 
-        kfree(entry_name);
+        list_add(&new_global->list, &module->peekable_globals);
     }
 
 ret:

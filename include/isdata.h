@@ -5,7 +5,6 @@
 #include <isdata-headers/isdata_meta.h>
 
 DEFINE_ISDATA_MAGIC_BYTES(isdata_magic_bytes);
-#define ISDATA_MAGIC_BYTES_LEN (sizeof(isdata_magic_bytes))
 
 struct peekable_module* parse_isdata_header(
     struct peekable_process* owner,

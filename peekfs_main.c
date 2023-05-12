@@ -4,6 +4,8 @@
 #include <linux/atomic.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
+#include <linux/fs.h>
+#include <linux/file.h>
 #include <linux/sched.h>
 #include <linux/rcupdate.h>
 #include <linux/pid.h>
