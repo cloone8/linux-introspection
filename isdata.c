@@ -11,6 +11,22 @@
 #include <peek_ops.h>
 #include <isdata.h>
 
+static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr) {
+    struct vm_area_struct* vma = vma_lookup(mm, (uintptr_t) addr);
+
+    if(unlikely(!vma)) {
+        return 0;
+    }
+
+    peekfs_assert(vma->vm_flags & VM_READ);
+
+    if(vma->vm_flags & VM_WRITE) {
+        return 0666;
+    } else {
+        return 0444;
+    }
+}
+
 struct peekable_module* parse_isdata_header(
     struct peekable_process* owner,
     void __user* isdata_header,
@@ -143,6 +159,8 @@ long parse_isdata_entries(
         // TODO: Break up this if/else
         if(entry->num_elems > 1) {
             uint64_t array_elem;
+            umode_t perms;
+
             new_global->proc_entry = proc_mkdir_data(entry_name, 0555, module->proc_entry, new_global);
 
             if(unlikely(!new_global->proc_entry)) {
@@ -155,29 +173,18 @@ long parse_isdata_entries(
 
             proc_set_size(new_global->proc_entry, entry->size * entry->num_elems);
 
+            perms = get_umode_for_addr(mm, new_global->addr + (array_elem * entry->size));
+
+            if(unlikely(!perms)) {
+                log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size));
+                perms = 0444;
+            }
+
             // TODO: Extract this for-loop body
             for(array_elem = 0; array_elem < entry->num_elems; array_elem++) {
                 struct proc_dir_entry* array_elem_entry;
                 char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
-                umode_t perms;
-                struct vm_area_struct* vma;
-                // TODO: Can we do this VMA lookup once for the entire array? Is the assumption
-                // that the array falls within one VMA correct?
-                vma = vma_lookup(mm, (uintptr_t) new_global->addr + (array_elem * entry->size));
 
-                if(likely(vma)) {
-                    perms = 0000;
-                    if(likely(vma->vm_flags & VM_READ)) {
-                        perms += 0444;
-                    }
-
-                    if(vma->vm_flags & VM_WRITE) {
-                        perms += 0222;
-                    }
-                } else {
-                    log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size));
-                    perms = 0444;
-                }
 
                 if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%llu", array_elem) >= PEEKFS_SMALLBUFSIZE)) {
                     log_err("Array index too high: %llu\n", array_elem);
@@ -203,19 +210,10 @@ long parse_isdata_entries(
             }
         } else {
             umode_t perms;
-            struct vm_area_struct* vma;
-            vma = vma_lookup(mm, (uintptr_t) new_global->addr);
 
-            if(likely(vma)) {
-                perms = 0000;
-                if(likely(vma->vm_flags & VM_READ)) {
-                    perms += 0444;
-                }
+            perms = get_umode_for_addr(mm, new_global->addr);
 
-                if(vma->vm_flags & VM_WRITE) {
-                    perms += 0222;
-                }
-            } else {
+            if(unlikely(!perms)) {
                 log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr);
                 perms = 0444;
             }
