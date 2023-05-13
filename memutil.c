@@ -7,6 +7,16 @@
 #include <peekfs.h>
 #include <log.h>
 
+#define USERSPACE_COPY_FROM (0)
+#define USERSPACE_COPY_TO (1)
+
+#define calc_pages_and_offsets(userbuf, bufsize, pages_start, pages_end, offset_from_requested, num_pages) {\
+    pages_start = rounddown((uintptr_t) userbuf, PAGE_SIZE);\
+    pages_end = roundup(((uintptr_t) userbuf) + bufsize, PAGE_SIZE);\
+    offset_from_requested = ((uintptr_t) userbuf) - pages_start;\
+    num_pages = (pages_end - pages_start) / PAGE_SIZE;\
+}
+
 static void put_pages(struct page** pages, size_t num) {
     size_t i;
 
@@ -15,33 +25,8 @@ static void put_pages(struct page** pages, size_t num) {
     }
 }
 
-// TODO: Break up into functions
-long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
-    uintptr_t pages_start, pages_end;
-    size_t num_pages, offset_from_requested;
-    struct page** pages;
-    void* mapped_pages;
-    long retval;
-
-    peekfs_assert(mm_locked != NULL);
-    peekfs_assert(*mm_locked == 1);
-
-    pages_start = rounddown((uintptr_t) user_buf, PAGE_SIZE);
-    pages_end = roundup(((uintptr_t) user_buf) + size, PAGE_SIZE);
-    offset_from_requested = ((uintptr_t) user_buf) - pages_start;
-
-    peekfs_assert((pages_start + offset_from_requested) < pages_end);
-    peekfs_assert((pages_end - pages_start) % PAGE_SIZE == 0);
-
-    num_pages = (pages_end - pages_start) / PAGE_SIZE;
-
-    pages = kmalloc(sizeof(struct page*) * num_pages, GFP_KERNEL);
-
-    if(unlikely(!pages)) {
-        return -ENOMEM;
-    }
-
-    retval = get_user_pages_remote(mm, pages_start, num_pages, 0, pages, NULL, mm_locked);
+static long gup_lock_recover(struct mm_struct* mm, uintptr_t start_addr, size_t num_pages, struct page** pages, int* mm_locked) {
+    long retval = get_user_pages_remote(mm, start_addr, num_pages, 0, pages, NULL, mm_locked);
 
     if(unlikely(!(*mm_locked))) {
         // If something went wrong and the lock was left unlocked, re-lock it
@@ -56,15 +41,48 @@ long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void*
     }
 
     if(unlikely(retval < 0)) {
-        log_err("Could not get pages at addresses %px->%px, GUPR returned %ld\n", (void*) pages_start, (void*) pages_end, retval);
+        log_err("Could not get pages at addresses %px->%px, GUPR returned %ld\n", (void*) start_addr, (void*) start_addr + (PAGE_SIZE * num_pages), retval);
         kfree(pages);
         return retval;
-    } if(unlikely(retval != num_pages)) {
-        log_err("GUPR did not return enough pages (%ld of %ld) for %px->%px\n", retval, num_pages, (void*) pages_start, (void*) pages_end);
+    } else if(unlikely(retval != num_pages)) {
+        log_err("GUPR did not return enough pages (%ld of %ld) for %px->%px\n", retval, num_pages, (void*) start_addr, (void*) start_addr + (PAGE_SIZE * num_pages));
 
         put_pages(pages, retval);
         kfree(pages);
         return -EFAULT;
+    }
+
+    return retval;
+}
+
+static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked, int copy_type) {
+    uintptr_t pages_start, pages_end;
+    size_t num_pages, offset_from_requested;
+    struct page** pages;
+    void* mapped_pages;
+    long retval;
+    long to_ret;
+
+    peekfs_assert(mm_locked != NULL);
+    peekfs_assert(*mm_locked == 1);
+
+    calc_pages_and_offsets(user_buf, size, pages_start, pages_end, offset_from_requested, num_pages);
+
+    peekfs_assert((pages_start + offset_from_requested) < pages_end);
+    peekfs_assert((pages_end - pages_start) % PAGE_SIZE == 0);
+
+    pages = kmalloc(sizeof(struct page*) * num_pages, GFP_KERNEL);
+
+    if(unlikely(!pages)) {
+        return -ENOMEM;
+    }
+
+    retval = gup_lock_recover(mm, pages_start, num_pages, pages, mm_locked);
+
+    if(unlikely(retval < 0)) {
+        log_err("GUP failed: %ld\n", retval);
+        kfree(pages);
+        return retval;
     }
 
     mapped_pages = vmap(pages, num_pages, 0, PAGE_KERNEL_RO);
@@ -78,17 +96,29 @@ long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void*
     }
 
     // Seems like everything went fine. Do the actual copy now
-    memcpy(buf, (void*) (((uintptr_t) mapped_pages) + offset_from_requested), size);
+    if(likely(copy_type == USERSPACE_COPY_FROM)) {
+        memcpy(buf, (void*) (((uintptr_t) mapped_pages) + offset_from_requested), size);
+        to_ret = 0;
+    } else if(likely(copy_type == USERSPACE_COPY_TO)) {
+        memcpy((void*) (((uintptr_t) mapped_pages) + offset_from_requested), buf, size);
+        to_ret = 0;
+    } else {
+        log_err("Invalid userspace copy param: %d\n", copy_type);
+        to_ret = -EINVAL;
+    }
 
     // Cleanup
     vunmap(mapped_pages);
     put_pages(pages, num_pages);
     kfree(pages);
 
-    return 0;
+    return to_ret;
+}
+
+long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
+    return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USERSPACE_COPY_FROM);
 }
 
 long copy_data_to_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
-    // TODO: Implement
-    return 0;
+    return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USERSPACE_COPY_TO);
 }
