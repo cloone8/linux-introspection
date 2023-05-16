@@ -62,6 +62,7 @@ static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void*
     void* mapped_pages;
     long retval;
     long to_ret;
+    pgprot_t map_prot;
 
     peekfs_assert(mm_locked != NULL);
     peekfs_assert(*mm_locked == 1);
@@ -85,7 +86,18 @@ static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void*
         return retval;
     }
 
-    mapped_pages = vmap(pages, num_pages, 0, PAGE_KERNEL_RO);
+    if(likely(copy_type == USERSPACE_COPY_FROM)) {
+        map_prot = PAGE_KERNEL_RO;
+    } else if(likely(copy_type == USERSPACE_COPY_TO)) {
+        map_prot = PAGE_KERNEL;
+    } else {
+        log_err("Invalid userspace copy param: %d\n", copy_type);
+        put_pages(pages, num_pages);
+        kfree(pages);
+        return -EINVAL;
+    }
+
+    mapped_pages = vmap(pages, num_pages, 0, map_prot);
 
     if(unlikely(mapped_pages == NULL)) {
         log_err("Could not map section header pages to kernel vmem for addresses %px->%px\n", (void*) pages_start, (void*) pages_end);
