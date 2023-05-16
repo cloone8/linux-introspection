@@ -14,40 +14,29 @@
 #include <memutil.h>
 #include <log.h>
 
-// TODO: Break this up into multiple functions
-static ssize_t peekfs_read_handler(
-    // Start of normal proc_read handler params
-    struct file* file,
-    char __user* buf,
-    size_t count,
-    loff_t* offset,
-    // End of normal proc_read handler params, custom params here
-    struct peekable_global* entry,
-    size_t elem
-) {
-    ssize_t to_ret = 0;
-    long retval;
-    void* addr_to_read;
-    size_t bytes_to_read;
+static long get_proc_structs(struct pid* pid, struct peekable_process** process_ret, struct task_struct** task_ret, struct mm_struct** mm_ret) {
     struct peekable_process* process;
     struct task_struct* process_task;
     struct mm_struct* mm;
-    void* kernel_userdata_buf;
-    int mm_locked = 0;
+    long retval;
+    long to_ret = 0;
+
+    peekfs_assert(pid != NULL);
+    peekfs_assert(process_ret != NULL);
+    peekfs_assert(task_ret != NULL);
+    peekfs_assert(mm_ret != NULL);
 
     // Let's find out what variable and what process has been read
-    process = peekfs_get_process(entry->owner_pid, 0);
+    process = peekfs_get_process(pid, 0);
 
     if(unlikely(IS_ERR(process))) {
         log_err("Error finding process to be introspected: %ld\n", PTR_ERR(process));
-        to_ret = PTR_ERR(process);
-        goto ret_no_unlock;
+        return PTR_ERR(process);
     }
 
     if(unlikely(!process)) {
         log_err("Could not find process to be introspected\n");
-        to_ret = -ESRCH;
-        goto ret_no_unlock;
+        return -ESRCH;
     }
 
     // Okay, now get the kernel task_struct for the process to-be-read
@@ -85,7 +74,52 @@ static ssize_t peekfs_read_handler(
     // ...and lock it
     if(unlikely(mmap_read_lock_killable(mm))) {
         to_ret = -EINTR;
-        goto ret_no_free_kbuf;
+        goto ret_err;
+    }
+
+    // Everything went okay. Assign the return variables
+    *process_ret = process;
+    *task_ret = process_task;
+    *mm_ret = mm;
+
+ret:
+    return to_ret;
+
+// Error handling routines
+ret_err:
+    mmput(mm);
+ret_no_mm_put:
+    put_task_struct(process_task);
+ret_no_task_put:
+    up_read(&process->lock);
+    goto ret;
+}
+
+static ssize_t peekfs_read_handler(
+    // Start of normal proc_read handler params
+    struct file* file,
+    char __user* buf,
+    size_t count,
+    loff_t* offset,
+    // End of normal proc_read handler params, custom params here
+    struct peekable_global* entry,
+    size_t elem
+) {
+    ssize_t to_ret = 0;
+    long retval;
+    void* addr_to_read;
+    size_t bytes_to_read;
+    struct peekable_process* process;
+    struct task_struct* process_task;
+    struct mm_struct* mm;
+    void* kernel_userdata_buf;
+    int mm_locked = 0;
+
+    retval = get_proc_structs(entry->owner_pid, &process, &process_task, &mm);
+
+    if(unlikely(retval != 0)) {
+        log_err("Could not get introspection task structs: %ld\n", retval);
+        return retval;
     }
 
     mm_locked = 1;
@@ -97,6 +131,7 @@ static ssize_t peekfs_read_handler(
         goto ret_no_free_kbuf;
     }
 
+    // addr = base + array_offset + file_offset
     addr_to_read = (void*) (((uintptr_t) entry->addr) + (entry->size * elem) + (*offset));
     bytes_to_read = min(count, (entry->size - (size_t)(*offset)));
     kernel_userdata_buf = kmalloc(bytes_to_read, GFP_KERNEL);
@@ -135,22 +170,18 @@ ret_no_free_kbuf:
         mmap_read_unlock(mm);
     }
     mmput(mm);
-ret_no_mm_put:
     put_task_struct(process_task);
-ret_no_task_put:
     up_read(&process->lock);
-ret_no_unlock:
     return to_ret;
 }
 
-//TODO: Combine with read handler?
 static ssize_t peekfs_write_handler(
-    // Start of normal proc_read handler params
+    // Start of normal proc_write handler params
     struct file* file,
     const char __user* buf,
     size_t count,
     loff_t* offset,
-    // End of normal proc_read handler params, custom params here
+    // End of normal proc_write handler params, custom params here
     struct peekable_global* entry,
     size_t elem
 ) {
@@ -164,57 +195,11 @@ static ssize_t peekfs_write_handler(
     void* kernel_userdata_buf;
     int mm_locked = 0;
 
-    // Let's find out what variable and what process has been read
-    process = peekfs_get_process(entry->owner_pid, 0);
+    retval = get_proc_structs(entry->owner_pid, &process, &process_task, &mm);
 
-    if(unlikely(IS_ERR(process))) {
-        log_err("Error finding process to be introspected: %ld\n", PTR_ERR(process));
-        to_ret = PTR_ERR(process);
-        goto ret_no_unlock;
-    }
-
-    if(unlikely(!process)) {
-        log_err("Could not find process to be introspected\n");
-        to_ret = -ESRCH;
-        goto ret_no_unlock;
-    }
-
-    // Okay, now get the kernel task_struct for the process to-be-read
-    process_task = get_pid_task(process->pid, PIDTYPE_PID);
-
-    if(unlikely(!process_task)) {
-        // Weird, the process must have been killed in the meantime. Remove it
-        struct pid* missing_pid = get_pid(process->pid);
-        up_read(&process->lock);
-        log_err("Could not get process task struct for PID %u\n", pid_nr(missing_pid));
-
-        retval = peekfs_remove_task_by_pid(missing_pid);
-
-        if(unlikely(retval != 1)) {
-            if(retval == 0) {
-                log_err("Couldn't remove process with PID %u, it was alreay gone\n", pid_nr(missing_pid));
-            } else {
-                log_err("Couldn't remove process with PID %u, error encountered: %ld\n", pid_nr(missing_pid), retval);
-            }
-        }
-
-        put_pid(missing_pid);
-        to_ret = -ESRCH;
-        goto ret_no_task_put;
-    }
-
-    // We got the task_struct, now get the memory management struct for it
-    mm = get_task_mm(process_task);
-
-    if(unlikely(!mm)) {
-        to_ret = -ENXIO;
-        goto ret_no_mm_put;
-    }
-
-    // ...and lock it
-    if(unlikely(mmap_read_lock_killable(mm))) {
-        to_ret = -EINTR;
-        goto ret_no_free_kbuf;
+    if(unlikely(retval != 0)) {
+        log_err("Could not get introspection task structs: %ld\n", retval);
+        return retval;
     }
 
     mm_locked = 1;
@@ -226,6 +211,7 @@ static ssize_t peekfs_write_handler(
         goto ret_no_free_kbuf;
     }
 
+    // addr = base + array_offset + file_offset
     addr_to_write = (void*) (((uintptr_t) entry->addr) + (entry->size * elem) + (*offset));
     bytes_to_write = min(count, (entry->size - (size_t)(*offset)));
     kernel_userdata_buf = kmalloc(bytes_to_write, GFP_KERNEL);
@@ -262,11 +248,8 @@ ret_no_free_kbuf:
         mmap_read_unlock(mm);
     }
     mmput(mm);
-ret_no_mm_put:
     put_task_struct(process_task);
-ret_no_task_put:
     up_read(&process->lock);
-ret_no_unlock:
     return to_ret;
 }
 
@@ -277,7 +260,11 @@ ret_no_unlock:
  * module's reference count.
  */
 static int open_handler(struct inode *inode, struct file *file) {
-	try_module_get(THIS_MODULE);
+	if(!try_module_get(THIS_MODULE)) {
+        log_err("Trying to open file for introspection but mpdule dying\n");
+        return -EFAULT;
+    }
+
 	return 0;
 }
 
