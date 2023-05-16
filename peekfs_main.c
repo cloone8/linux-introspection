@@ -54,8 +54,6 @@ static ssize_t register_write(struct file* file, const char __user* buffer, size
     void __user* module_hdr;
     atomic64_inc(&active_handlers);
 
-    log_info("User writing %lu bytes to register file\n", count);
-
     if(count != sizeof(void*)) {
         // User must write exactly one pointer
         to_ret = -EINVAL;
@@ -99,8 +97,6 @@ static ssize_t unregister_write(struct file* file, const char __user* buffer, si
     struct pid* pid;
     void __user* module_hdr;
     atomic64_inc(&active_handlers);
-
-    log_info("User writing %lu bytes to unregister file\n", count);
 
     if(count != sizeof(void*)) {
         // User must write exactly one pointer
