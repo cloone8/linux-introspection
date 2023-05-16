@@ -7,8 +7,10 @@
 #include <peekfs.h>
 #include <log.h>
 
-#define USERSPACE_COPY_FROM (0)
-#define USERSPACE_COPY_TO (1)
+typedef enum {
+    USPACE_COPY_FROM,
+    USPACE_COPY_TO
+} uspace_copy_t;
 
 #define calc_pages_and_offsets(userbuf, bufsize, pages_start, pages_end, offset_from_requested, num_pages) {\
     pages_start = rounddown((uintptr_t) userbuf, PAGE_SIZE);\
@@ -55,7 +57,7 @@ static long gup_lock_recover(struct mm_struct* mm, uintptr_t start_addr, size_t 
     return retval;
 }
 
-static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked, int copy_type) {
+static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked, uspace_copy_t copy_type) {
     uintptr_t pages_start, pages_end;
     size_t num_pages, offset_from_requested;
     struct page** pages;
@@ -86,15 +88,12 @@ static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void*
         return retval;
     }
 
-    if(likely(copy_type == USERSPACE_COPY_FROM)) {
+    if(likely(copy_type == USPACE_COPY_FROM)) {
         map_prot = PAGE_KERNEL_RO;
-    } else if(likely(copy_type == USERSPACE_COPY_TO)) {
+    } else if(likely(copy_type == USPACE_COPY_TO)) {
         map_prot = PAGE_KERNEL;
     } else {
-        log_err("Invalid userspace copy param: %d\n", copy_type);
-        put_pages(pages, num_pages);
-        kfree(pages);
-        return -EINVAL;
+        peekfs_assert(false);
     }
 
     mapped_pages = vmap(pages, num_pages, 0, map_prot);
@@ -108,15 +107,14 @@ static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void*
     }
 
     // Seems like everything went fine. Do the actual copy now
-    if(likely(copy_type == USERSPACE_COPY_FROM)) {
+    if(likely(copy_type == USPACE_COPY_FROM)) {
         memcpy(buf, (void*) (((uintptr_t) mapped_pages) + offset_from_requested), size);
         to_ret = 0;
-    } else if(likely(copy_type == USERSPACE_COPY_TO)) {
+    } else if(likely(copy_type == USPACE_COPY_TO)) {
         memcpy((void*) (((uintptr_t) mapped_pages) + offset_from_requested), buf, size);
         to_ret = 0;
     } else {
-        log_err("Invalid userspace copy param: %d\n", copy_type);
-        to_ret = -EINVAL;
+        peekfs_assert(false);
     }
 
     // Cleanup
@@ -128,9 +126,9 @@ static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void*
 }
 
 long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
-    return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USERSPACE_COPY_FROM);
+    return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USPACE_COPY_FROM);
 }
 
 long copy_data_to_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
-    return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USERSPACE_COPY_TO);
+    return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USPACE_COPY_TO);
 }
