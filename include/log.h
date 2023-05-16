@@ -4,9 +4,6 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 
-// TODO: Remove this after resolving TODO in debug.h
-#include <debug.h>
-
 #ifdef PEEKFS_DEBUG
     #define __peekfs_log(level, fmt, ...) printk(level "peekfs: " fmt, ##__VA_ARGS__); udelay(300)
 #else
