@@ -1,7 +1,7 @@
 obj-m+= peekfs.o
 
 peekfs-y+= peekfs_main.o process.o isdata.o memutil.o
-peekfs-y+= peek_ops/common.o peek_ops/single.o peek_ops/array.o peek_ops/lib.o
+peekfs-y+= peek_ops/common.o peek_ops/single.o peek_ops/array.o peek_ops/struct.o peek_ops/lib.o
 
 ccflags-y+=-Wall -Werror -I$(src)/include
 
