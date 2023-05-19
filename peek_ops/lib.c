@@ -15,6 +15,8 @@
 #include <log.h>
 #include <debug.h>
 
+#include "internal.h"
+
 static long get_proc_structs(struct pid* pid, struct peekable_process** process_ret, struct task_struct** task_ret, struct mm_struct** mm_ret) {
     struct peekable_process* process;
     struct task_struct* process_task;
@@ -96,7 +98,7 @@ ret_no_task_put:
     goto ret;
 }
 
-static ssize_t peekfs_read_handler(
+ssize_t peekfs_read_handler(
     // Start of normal proc_read handler params
     struct file* file,
     char __user* buf,
@@ -176,7 +178,7 @@ ret_no_free_kbuf:
     return to_ret;
 }
 
-static ssize_t peekfs_write_handler(
+ssize_t peekfs_write_handler(
     // Start of normal proc_write handler params
     struct file* file,
     const char __user* buf,
@@ -253,57 +255,3 @@ ret_no_free_kbuf:
     up_read(&process->lock);
     return to_ret;
 }
-
-
-/*
- * The file is opened - we don't really care about
- * that, but it does mean we need to increment the
- * module's reference count.
- */
-static int open_handler(struct inode *inode, struct file *file) {
-	if(!try_module_get(THIS_MODULE)) {
-        log_err("Trying to open file for introspection but mpdule dying\n");
-        return -EFAULT;
-    }
-
-	return 0;
-}
-
-/*
- * The file is closed - again, interesting only because
- * of the reference count.
- */
-static int close_handler(struct inode *inode, struct file *file) {
-	module_put(THIS_MODULE);
-	return 0;
-}
-
-static ssize_t array_read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
-    return peekfs_read_handler(file, buf, count, offset, proc_get_parent_data(file_inode(file)), (size_t)pde_data(file_inode(file)));
-}
-
-static ssize_t array_write_handler(struct file* file, const char __user* buf, size_t count, loff_t* offset) {
-    return peekfs_write_handler(file, buf, count, offset, proc_get_parent_data(file_inode(file)), (size_t)pde_data(file_inode(file)));
-}
-
-static ssize_t single_read_handler(struct file* file, char __user* buf, size_t count, loff_t* offset) {
-    return peekfs_read_handler(file, buf, count, offset, pde_data(file_inode(file)), 0);
-}
-
-static ssize_t single_write_handler(struct file* file, const char __user* buf, size_t count, loff_t* offset) {
-    return peekfs_write_handler(file, buf, count, offset, pde_data(file_inode(file)), 0);
-}
-
-struct proc_ops peek_ops_single = {
-    .proc_read = single_read_handler,
-    .proc_write = single_write_handler,
-    .proc_open = open_handler,
-    .proc_release = close_handler,
-};
-
-struct proc_ops peek_ops_array = {
-    .proc_read = array_read_handler,
-    .proc_write = array_write_handler,
-    .proc_open = open_handler,
-    .proc_release = close_handler,
-};
