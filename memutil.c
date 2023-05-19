@@ -6,6 +6,7 @@
 #include <memutil.h>
 #include <peekfs.h>
 #include <log.h>
+#include <debug.h>
 
 typedef enum {
     USPACE_COPY_FROM,

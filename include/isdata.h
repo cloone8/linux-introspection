@@ -4,7 +4,7 @@
 #include <linux/kernel.h>
 #include <isdata-headers/isdata_meta.h>
 
-DEFINE_ISDATA_MAGIC_BYTES(isdata_magic_bytes);
+static DEFINE_ISDATA_MAGIC_BYTES(isdata_magic_bytes);
 
 struct peekable_module* parse_isdata_header(
     struct peekable_process* owner,

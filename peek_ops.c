@@ -13,6 +13,7 @@
 #include <peek_ops.h>
 #include <memutil.h>
 #include <log.h>
+#include <debug.h>
 
 static long get_proc_structs(struct pid* pid, struct peekable_process** process_ret, struct task_struct** task_ret, struct mm_struct** mm_ret) {
     struct peekable_process* process;

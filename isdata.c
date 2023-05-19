@@ -10,6 +10,7 @@
 #include <log.h>
 #include <peek_ops.h>
 #include <isdata.h>
+#include <debug.h>
 
 static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr) {
     struct vm_area_struct* vma = vma_lookup(mm, (uintptr_t) addr);
@@ -96,12 +97,12 @@ static long parse_isdata_array_entry(struct peekable_global* new_global, struct 
         return -EIO;
     }
 
-    proc_set_size(new_global->proc_entry, entry->size * entry->num_elems);
+    proc_set_size(new_global->proc_entry, entry->size_or_def * entry->num_elems);
 
-    perms = get_umode_for_addr(mm, new_global->addr + (array_elem * entry->size));
+    perms = get_umode_for_addr(mm, new_global->addr + (array_elem * entry->size_or_def));
 
     if(unlikely(!perms)) {
-        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size));
+        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size_or_def));
         perms = 0444;
     }
 
@@ -123,7 +124,7 @@ static long parse_isdata_array_entry(struct peekable_global* new_global, struct 
             return -EIO;
         }
 
-        proc_set_size(array_elem_entry, entry->size);
+        proc_set_size(array_elem_entry, entry->size_or_def);
     }
 
     return 0;
@@ -146,7 +147,7 @@ static long parse_isdata_single_entry(struct peekable_global* new_global, struct
         return -EIO;
     }
 
-    proc_set_size(new_global->proc_entry, entry->size);
+    proc_set_size(new_global->proc_entry, entry->size_or_def);
 
     return 0;
 }
@@ -186,7 +187,7 @@ static long parse_isdata_entry(struct peekable_module* module, struct isdata_ent
     new_global->name = entry_name;
     new_global->addr = entry->addr;
     new_global->owner_pid = module->owner_pid;
-    new_global->size = entry->size;
+    new_global->size = entry->size_or_def;
 
     if(entry->num_elems > 1) {
         retval = parse_isdata_array_entry(new_global, module, mm, entry_name, entry);
