@@ -12,6 +12,12 @@
 #include <isdata.h>
 #include <debug.h>
 
+static long parse_isdata_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
+static long parse_isdata_array_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
+static long parse_isdata_single_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
+static char* get_entry_name(struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
+static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr);
+
 static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr) {
     struct vm_area_struct* vma = vma_lookup(mm, (uintptr_t) addr);
 
@@ -26,6 +32,181 @@ static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr) {
     } else {
         return 0444;
     }
+}
+
+static long parse_isdata_array_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
+    uint64_t array_elem;
+    umode_t perms;
+    char* entry_name;
+    struct peekable_global* new_global;
+    long to_ret = 0;
+
+    entry_name = get_entry_name(entry, mm, mm_locked);
+
+    if(unlikely(IS_ERR(entry_name))) {
+        log_err("Could not determine entry name in module %s: %ld\n", module->name, PTR_ERR(entry_name));
+        return PTR_ERR(entry_name);
+    }
+
+    new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
+
+    if(unlikely(!new_global)) {
+        kfree(entry_name);
+        return -ENOMEM;
+    }
+
+    INIT_LIST_HEAD(&new_global->list);
+    new_global->name = entry_name;
+    new_global->addr = entry->addr;
+    new_global->owner_pid = module->owner_pid;
+    new_global->size = entry->size_or_def;
+
+    new_global->proc_entry = proc_mkdir_data(entry_name, 0555, module->proc_entry, new_global);
+
+    if(unlikely(!new_global->proc_entry)) {
+        log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
+        to_ret = -EIO;
+        goto ret_no_proc_remove;
+    }
+
+    proc_set_size(new_global->proc_entry, entry->size_or_def * entry->num_elems);
+
+    perms = get_umode_for_addr(mm, new_global->addr + (array_elem * entry->size_or_def));
+
+    if(unlikely(!perms)) {
+        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size_or_def));
+        perms = 0444;
+    }
+
+    for(array_elem = 0; array_elem < entry->num_elems; array_elem++) {
+        struct proc_dir_entry* array_elem_entry;
+        char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
+
+        if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%llu", array_elem) >= PEEKFS_SMALLBUFSIZE)) {
+            log_err("Array index too high: %llu\n", array_elem);
+            to_ret = -E2BIG;
+            goto ret_err;
+        }
+
+        array_elem_entry = proc_create_data(elem_name, perms, new_global->proc_entry, &peek_ops_array, (void*)array_elem);
+
+        if(unlikely(!array_elem_entry)) {
+            log_err("Array entry could not be created: %llu\n", array_elem);
+            to_ret = -EIO;
+            goto ret_err;
+        }
+
+        proc_set_size(array_elem_entry, entry->size_or_def);
+    }
+
+    list_add(&new_global->list, &module->peekable_globals);
+
+ret:
+    return to_ret;
+
+ret_err:
+    proc_remove(new_global->proc_entry);
+
+ret_no_proc_remove:
+    kfree(new_global);
+    kfree(entry_name);
+
+    goto ret;
+}
+
+static long parse_isdata_single_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
+    umode_t perms;
+    char* entry_name;
+    struct peekable_global* new_global;
+
+    entry_name = get_entry_name(entry, mm, mm_locked);
+
+    if(unlikely(IS_ERR(entry_name))) {
+        log_err("Could not determine entry name in module %s: %ld\n", module->name, PTR_ERR(entry_name));
+        return PTR_ERR(entry_name);
+    }
+
+    new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
+
+    if(unlikely(!new_global)) {
+        kfree(entry_name);
+        return -ENOMEM;
+    }
+
+    INIT_LIST_HEAD(&new_global->list);
+    new_global->name = entry_name;
+    new_global->addr = entry->addr;
+    new_global->owner_pid = module->owner_pid;
+    new_global->size = entry->size_or_def;
+
+    perms = get_umode_for_addr(mm, new_global->addr);
+
+    if(unlikely(!perms)) {
+        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr);
+        perms = 0444;
+    }
+
+    if(entry->flags & ISDATA_EFLAG_STRUCT) {
+
+    } else {
+        new_global->proc_entry = proc_create_data(entry_name, perms, module->proc_entry, &peek_ops_single, new_global);
+
+        if(unlikely(!new_global->proc_entry)) {
+            log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
+            kfree(entry_name);
+            kfree(new_global);
+            return -EIO;
+        }
+
+        proc_set_size(new_global->proc_entry, entry->size_or_def);
+    }
+
+    list_add(&new_global->list, &module->peekable_globals);
+
+    return 0;
+}
+
+static char* get_entry_name(struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
+    char* entry_name;
+    long retval;
+
+    if(unlikely(entry->name_len > PEEKFS_HUGEBUFSIZE)) {
+        log_err("Entry name is too large: %u\n", entry->name_len);
+        return ERR_PTR(-E2BIG);
+    }
+
+    entry_name = kmalloc(entry->name_len, GFP_KERNEL);
+
+    if(unlikely(!entry_name)) {
+        return ERR_PTR(-ENOMEM);
+    }
+
+    retval = copy_data_from_userspace(mm, entry->name, entry_name, entry->name_len, mm_locked);
+
+    if(unlikely(retval < 0)) {
+        log_err("Could not copy entry name to kernelspace: %ld\n", retval);
+        kfree(entry_name);
+        return ERR_PTR(retval);
+    }
+
+    return entry_name;
+}
+
+static long parse_isdata_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
+    long retval;
+
+    if(entry->num_elems > 1) {
+        retval = parse_isdata_array_entry(module, entry, mm, mm_locked);
+    } else {
+        retval = parse_isdata_single_entry(module, entry, mm, mm_locked);
+    }
+
+    if(unlikely(retval != 0)) {
+        log_err("Could not create proc_entry for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
+        return retval;
+    }
+
+    return 0;
 }
 
 struct peekable_module* parse_isdata_header(
@@ -84,128 +265,6 @@ struct peekable_module* parse_isdata_header(
     list_add(&new_module->list, &owner->peekable_modules);
 
     return new_module;
-}
-
-static long parse_isdata_array_entry(struct peekable_global* new_global, struct peekable_module* module, struct mm_struct* mm, char* name, struct isdata_entry* entry) {
-    uint64_t array_elem;
-    umode_t perms;
-
-    new_global->proc_entry = proc_mkdir_data(name, 0555, module->proc_entry, new_global);
-
-    if(unlikely(!new_global->proc_entry)) {
-        log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
-        return -EIO;
-    }
-
-    proc_set_size(new_global->proc_entry, entry->size_or_def * entry->num_elems);
-
-    perms = get_umode_for_addr(mm, new_global->addr + (array_elem * entry->size_or_def));
-
-    if(unlikely(!perms)) {
-        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size_or_def));
-        perms = 0444;
-    }
-
-    for(array_elem = 0; array_elem < entry->num_elems; array_elem++) {
-        struct proc_dir_entry* array_elem_entry;
-        char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
-
-        if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%llu", array_elem) >= PEEKFS_SMALLBUFSIZE)) {
-            log_err("Array index too high: %llu\n", array_elem);
-            proc_remove(new_global->proc_entry);
-            return -E2BIG;
-        }
-
-        array_elem_entry = proc_create_data(elem_name, perms, new_global->proc_entry, &peek_ops_array, (void*)array_elem);
-
-        if(unlikely(!array_elem_entry)) {
-            log_err("Array entry could not be created: %llu\n", array_elem);
-            proc_remove(new_global->proc_entry);
-            return -EIO;
-        }
-
-        proc_set_size(array_elem_entry, entry->size_or_def);
-    }
-
-    return 0;
-}
-
-static long parse_isdata_single_entry(struct peekable_global* new_global, struct peekable_module* module, struct mm_struct* mm, char* name, struct isdata_entry* entry) {
-    umode_t perms;
-
-    perms = get_umode_for_addr(mm, new_global->addr);
-
-    if(unlikely(!perms)) {
-        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr);
-        perms = 0444;
-    }
-
-    new_global->proc_entry = proc_create_data(name, perms, module->proc_entry, &peek_ops_single, new_global);
-
-    if(unlikely(!new_global->proc_entry)) {
-        log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
-        return -EIO;
-    }
-
-    proc_set_size(new_global->proc_entry, entry->size_or_def);
-
-    return 0;
-}
-
-static long parse_isdata_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
-    long retval;
-    char* entry_name;
-    struct peekable_global* new_global;
-
-    if(unlikely(entry->name_len > PEEKFS_HUGEBUFSIZE)) {
-        log_err("Entry name in module %s too large: %u\n", module->name, entry->name_len);
-        return -E2BIG;
-    }
-
-    entry_name = kmalloc(entry->name_len, GFP_KERNEL);
-
-    if(unlikely(!entry_name)) {
-        return -ENOMEM;
-    }
-
-    retval = copy_data_from_userspace(mm, entry->name, entry_name, entry->name_len, mm_locked);
-
-    if(unlikely(retval < 0)) {
-        log_err("Could not copy entry name to kernelspace in module %s: %ld\n", module->name, retval);
-        kfree(entry_name);
-        return retval;
-    }
-
-    new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
-
-    if(unlikely(!new_global)) {
-        kfree(entry_name);
-        return -ENOMEM;
-    }
-
-    INIT_LIST_HEAD(&new_global->list);
-    new_global->name = entry_name;
-    new_global->addr = entry->addr;
-    new_global->owner_pid = module->owner_pid;
-    new_global->size = entry->size_or_def;
-
-    if(entry->num_elems > 1) {
-        retval = parse_isdata_array_entry(new_global, module, mm, entry_name, entry);
-    } else {
-        retval = parse_isdata_single_entry(new_global, module, mm, entry_name, entry);
-    }
-
-    if(unlikely(retval != 0)) {
-        log_err("Could not create proc_entry for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
-        kfree(entry_name);
-        kfree(new_global);
-
-        return retval;
-    }
-
-    list_add(&new_global->list, &module->peekable_globals);
-
-    return 0;
 }
 
 long parse_isdata_entries(
