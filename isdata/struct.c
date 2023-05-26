@@ -95,6 +95,70 @@ ret:
     return to_ret;
 }
 
+static long parse_singular_struct_entry(
+    struct peekable_module* module,
+    struct proc_dir_entry* parent,
+    void __user* addr,
+    umode_t perms,
+    struct isdata_structdef* structlayout,
+    struct mm_struct* mm, int* mm_locked
+) {
+    long retval = parse_isdata_struct_fields(module, parent, addr, perms, structlayout, mm, mm_locked);
+
+    if(unlikely(retval < 0)) {
+        log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
+        return retval;
+    }
+
+    proc_set_size(parent, structlayout->size);
+
+    return structlayout->size;
+}
+
+static long parse_array_struct_entry(
+    size_t num_elems,
+    struct peekable_module* module,
+    struct proc_dir_entry* parent,
+    void __user* addr,
+    umode_t perms,
+    struct isdata_structdef* structlayout,
+    struct mm_struct* mm, int* mm_locked
+) {
+    size_t i;
+
+    for(i = 0; i < num_elems; i++) {
+        long retval;
+        char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
+        struct proc_dir_entry* struct_field_parent;
+        void __user* elem_addr = (void*) (((uintptr_t) addr) + (i * structlayout->size));
+
+        if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%lu", i) >= PEEKFS_SMALLBUFSIZE)) {
+            log_err("Array index too high: %lu\n", i);
+            return -E2BIG;
+        }
+
+        struct_field_parent = proc_mkdir_data(elem_name, 0555, parent, NULL);
+
+        if(unlikely(!struct_field_parent)) {
+            log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
+            return -EIO;
+        }
+
+        retval = parse_isdata_struct_fields(module, struct_field_parent, elem_addr, perms, structlayout, mm, mm_locked);
+
+        if(unlikely(retval < 0)) {
+            log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
+            return retval;
+        }
+
+        proc_set_size(struct_field_parent, structlayout->size);
+    }
+
+    proc_set_size(parent, structlayout->size * structlayout->num_fields);
+
+    return structlayout->size * structlayout->num_fields;
+}
+
 long parse_isdata_struct_entry(
     struct peekable_module* module,
     struct proc_dir_entry* parent,
@@ -125,53 +189,18 @@ long parse_isdata_struct_entry(
         return -EIO;
     }
 
-    if(num_elems <= 1) {
-        retval = parse_isdata_struct_fields(module, struct_folder_entry, addr, perms, &structlayout, mm, mm_locked);
-
-        if(unlikely(retval < 0)) {
-            log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
-            return retval;
-        }
-
-        proc_set_size(struct_folder_entry, structlayout.size);
-
-        log_info("Done parsing struct %s. Total size %llu\n", name, structlayout.size);
-
-        return structlayout.size;
+    if(num_elems > 1) {
+        retval = parse_array_struct_entry(num_elems, module, struct_folder_entry, addr, perms, &structlayout, mm, mm_locked);
     } else {
-        size_t i;
-
-        for(i = 0; i < num_elems; i++) {
-            char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
-            struct proc_dir_entry* struct_field_parent;
-            void __user* elem_addr = (void*) (((uintptr_t) addr) + (i * structlayout.size));
-
-            if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%lu", i) >= PEEKFS_SMALLBUFSIZE)) {
-                log_err("Array index too high: %lu\n", i);
-                return -E2BIG;
-            }
-
-            struct_field_parent = proc_mkdir_data(elem_name, 0555, struct_folder_entry, NULL);
-
-            if(unlikely(!struct_field_parent)) {
-                log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
-                return -EIO;
-            }
-
-            retval = parse_isdata_struct_fields(module, struct_field_parent, elem_addr, perms, &structlayout, mm, mm_locked);
-
-            if(unlikely(retval < 0)) {
-                log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
-                return retval;
-            }
-
-            proc_set_size(struct_field_parent, structlayout.size);
-        }
-
-        proc_set_size(struct_folder_entry, structlayout.size * structlayout.num_fields);
-
-        log_info("Done parsing struct %s. Total size %llu\n", name, structlayout.size * structlayout.num_fields);
-
-        return structlayout.size * structlayout.num_fields;
+        retval = parse_singular_struct_entry(module, struct_folder_entry, addr, perms, &structlayout, mm, mm_locked);
     }
+
+    if(unlikely(retval < 0)) {
+        log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
+        return retval;
+    }
+
+    log_info("Done parsing struct %s. Total size %lu\n", name, retval);
+
+    return retval;
 }
