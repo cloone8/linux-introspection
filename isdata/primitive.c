@@ -1,6 +1,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
+#include <linux/list.h>
 
 #include <peekfs.h>
 #include <peek_ops.h>
@@ -9,22 +10,63 @@
 #include <isdata.h>
 #include <process.h>
 
+static struct peekable_global* alloc_global(char* name, void __user* addr, struct pid* owner_pid, size_t size) {
+    struct peekable_global* new_global;
+    size_t name_len;
+    char* name_cpy;
+
+    new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
+
+    if(unlikely(!new_global)) {
+        return ERR_PTR(-ENOMEM);
+    }
+
+    name_len = strnlen(name, PEEKFS_HUGEBUFSIZE);
+
+    if(unlikely(name_len >= (PEEKFS_HUGEBUFSIZE - 1))) {
+        log_err("Entry name too large\n");
+        kfree(new_global);
+        return ERR_PTR(-E2BIG);
+    }
+
+    name_cpy = kmalloc(sizeof(char) * (name_len + 1), GFP_KERNEL);
+
+    if(unlikely(!name_cpy)) {
+        kfree(new_global);
+        return ERR_PTR(-ENOMEM);
+    }
+
+    if(unlikely(strscpy(name_cpy, name, name_len + 1) == -E2BIG)) {
+        log_err("Entry name copy too large\n");
+        kfree(name_cpy);
+        kfree(new_global);
+        return ERR_PTR(-E2BIG);
+    }
+
+    INIT_LIST_HEAD(&new_global->list);
+    new_global->name = name_cpy;
+    new_global->addr = addr;
+    new_global->owner_pid = owner_pid;
+    new_global->size = size;
+
+    return new_global;
+}
+
 long parse_isdata_primitive_array_entry(struct peekable_module* module, struct proc_dir_entry* parent, char* name, void __user* addr, size_t size, size_t num_elems, umode_t perms, struct mm_struct* mm, int* mm_locked) {
     uint64_t array_elem;
     struct peekable_global* new_global;
     long to_ret = size * num_elems;
 
-    new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
+    peekfs_assert(module != NULL);
+    peekfs_assert(parent != NULL);
+    peekfs_assert(name != NULL);
 
-    if(unlikely(!new_global)) {
-        return -ENOMEM;
+    new_global = alloc_global(name, addr, module->owner_pid, size);
+
+    if(unlikely(IS_ERR(new_global))) {
+        log_err("Could not allocate new peekable global: %ld\n", PTR_ERR(new_global));
+        return PTR_ERR(new_global);
     }
-
-    INIT_LIST_HEAD(&new_global->list);
-    new_global->name = name;
-    new_global->addr = addr;
-    new_global->owner_pid = module->owner_pid;
-    new_global->size = size;
 
     new_global->proc_entry = proc_mkdir_data(name, 0555, parent, new_global);
 
@@ -73,17 +115,17 @@ ret_no_proc_remove:
 
 long parse_isdata_primitive_entry(struct peekable_module* module, struct proc_dir_entry* parent, char* name, void __user* addr, size_t size, umode_t perms, struct mm_struct* mm, int* mm_locked) {
     struct peekable_global* new_global;
-    new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
 
-    if(unlikely(!new_global)) {
-        return -ENOMEM;
+    peekfs_assert(module != NULL);
+    peekfs_assert(parent != NULL);
+    peekfs_assert(name != NULL);
+
+    new_global = alloc_global(name, addr, module->owner_pid, size);
+
+    if(unlikely(IS_ERR(new_global))) {
+        log_err("Could not allocate new peekable global: %ld\n", PTR_ERR(new_global));
+        return PTR_ERR(new_global);
     }
-
-    INIT_LIST_HEAD(&new_global->list);
-    new_global->name = name;
-    new_global->addr = addr;
-    new_global->owner_pid = module->owner_pid;
-    new_global->size = size;
 
     new_global->proc_entry = proc_create_data(name, perms, parent, &peek_ops_single, new_global);
 

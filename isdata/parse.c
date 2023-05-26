@@ -95,6 +95,8 @@ static long parse_isdata_entry(struct peekable_module* module, struct isdata_ent
 
     log_info("DONE PARSING ENTRY %s\n", entry_name);
 
+    kfree(entry_name);
+
     return retval;
 }
 

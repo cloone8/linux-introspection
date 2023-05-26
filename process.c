@@ -223,6 +223,8 @@ static void remove_peekable_global(struct peekable_module* module, struct peekab
     peekfs_assert(global != NULL);
     peekfs_assert(!list_entry_is_head(global, &module->peekable_globals, list));
 
+    log_info("Removing global %s from module %s\n", global->name, module->name);
+
     list_del(&global->list);
     proc_remove(global->proc_entry);
     kfree(global->name);
@@ -239,6 +241,8 @@ static void remove_peekable_module(struct peekable_process *owner, struct peekab
     peekfs_assert(module != NULL);
     peekfs_assert(owner != NULL);
     peekfs_assert(!list_entry_is_head(module, &owner->peekable_modules, list));
+
+    log_info("Removing module %s from process %u\n", module->name, pid_nr(owner->pid));
 
     // Do this first, so the process cannot be found anymore
     list_for_each_safe(cur, next, &module->peekable_globals) {
@@ -261,6 +265,8 @@ static void remove_peekable_process(struct peekable_process *process) {
     struct list_head *cur, *next;
     peekfs_assert(process != NULL);
     peekfs_assert(!list_entry_is_head(process, &peekable_process_list, list));
+
+    log_info("Removing process with pid %u\n", pid_nr(process->pid));
 
     // Do this first, so the process cannot be found anymore
     list_for_each_safe(cur, next, &process->peekable_modules) {

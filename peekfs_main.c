@@ -147,8 +147,6 @@ static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* re
         goto ret;
     }
 
-    log_info("Exec handler for %s with pid %d in CPU %d\n", task_name, pid_nr(pid), smp_processor_id());
-
     retval = peekfs_remove_task_by_pid(pid);
 
     if(unlikely(retval < 0)) {
@@ -174,8 +172,6 @@ static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* re
         log_warn("Couldn't get local PID for PID %d\n", current->pid);
         goto ret;
     }
-
-    log_info("Exit handler for %s with pid %d in CPU %d\n", task_name, pid_nr(pid), smp_processor_id());
 
     retval = peekfs_remove_task_by_pid(pid);
 
