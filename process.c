@@ -23,6 +23,7 @@ static DECLARE_RWSEM(peekable_process_list_rwsem);
 static struct peekable_process *create_peekable_process(struct pid* pid);
 static struct peekable_module *create_peekable_module(struct peekable_process *owner, void __user* isdata_header);
 static struct peekable_process *find_process_in_list(struct pid* pid);
+static struct peekable_module *find_module_in_list(struct peekable_process* process, void __user* mod_hdr);
 static void remove_peekable_global(struct peekable_module* module, struct peekable_global* global);
 static void remove_peekable_module(struct peekable_process *owner, struct peekable_module *module);
 static void remove_peekable_process(struct peekable_process *process);
@@ -193,6 +194,26 @@ static struct peekable_process *find_process_in_list(struct pid* pid) {
 }
 
 /**
+ * Finds a module in the given process by its header.
+ *
+ * Requires the process read-lock to be held
+ */
+static struct peekable_module *find_module_in_list(struct peekable_process* process, void __user* mod_hdr) {
+    struct list_head *node;
+    peekfs_assert(process != NULL);
+
+    list_for_each(node, &process->peekable_modules) {
+        struct peekable_module *module = container_of(node, struct peekable_module, list);
+
+        if(module->isdata_header == mod_hdr) {
+            return module;
+        }
+    }
+
+    return NULL;
+}
+
+/**
  * Removes a peekable module from the given process.
  *
  * Requires the owner peekable_process write-lock to be held
@@ -310,31 +331,18 @@ struct peekable_process* peekfs_get_process(struct pid* pid, int access) {
  */
 long peekfs_remove_task_by_pid(struct pid* pid) {
     struct peekable_process *process;
-
-    down_read(&peekable_process_list_rwsem);
-
-    process = find_process_in_list(pid);
-    up_read(&peekable_process_list_rwsem);
-
-    if(likely(process == NULL)) {
-        // Not nearly all processes in the system are
-        // peekable, so we expect the search to turn up empty
-        return 0;
-    }
-
-    // Okay, we know the process is peekable. Re-acquire the lock as writable,
-    // find the process again (because the unlock might have caused someone else
-    // to delete the proceess) and delete it
     down_write(&peekable_process_list_rwsem);
+
     process = find_process_in_list(pid);
 
-    if(unlikely(process == NULL)) {
-        // Someone else deleted the process in the meantime. Just return
+    if(process == NULL) {
+        // Process does not exist or is not peekable
         up_write(&peekable_process_list_rwsem);
         return 0;
     }
 
     down_write(&process->lock);
+
     remove_peekable_process(process);
 
     up_write(&peekable_process_list_rwsem);
@@ -408,10 +416,42 @@ ret_unlock_list:
 
 long peekfs_remove_module(struct pid* pid, void __user* module_hdr) {
     long to_ret = 0;
-    down_read(&peekable_process_list_rwsem);
+    struct peekable_process* process;
+    struct peekable_module* module;
 
-    up_read(&peekable_process_list_rwsem);
+    down_write(&peekable_process_list_rwsem);
+
+    process = find_process_in_list(pid);
+
+    if(unlikely(!process)) {
+        log_err("Attempted to remove module for non-existing process %u\n", pid_nr(pid));
+        to_ret = -ESRCH;
+        goto ret_no_unlock_proc;
+    }
+
+    down_write(&process->lock);
+
+    module = find_module_in_list(process, module_hdr);
+
+    if(unlikely(!module)) {
+        log_err("Attempted to remove non-existing module from process %u\n", pid_nr(pid));
+        to_ret = -ENXIO;
+        goto ret_unlock_proc;
+    }
+
+    remove_peekable_module(process, module);
+
+    if(list_empty(&process->peekable_modules)) {
+        remove_peekable_process(process);
+        goto ret_no_unlock_proc;
+    }
+
+ret_unlock_proc:
+    up_write(&process->lock);
+ret_no_unlock_proc:
+    up_write(&peekable_process_list_rwsem);
     return to_ret;
+
 }
 
 long peekfs_clear_task_list(void) {

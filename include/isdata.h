@@ -1,25 +1,12 @@
 #ifndef __PEEKFS_ISDATA_H__
 #define __PEEKFS_ISDATA_H__
 
-#include <linux/kernel.h>
 #include <isdata-headers/isdata_meta.h>
 
-static DEFINE_ISDATA_MAGIC_BYTES(isdata_magic_bytes);
+extern const uint8_t isdata_magic_bytes[ISDATA_MAGIC_BYTES_LEN];
 
-struct peekable_module* parse_isdata_header(
-    struct peekable_process* owner,
-    void __user* isdata_header,
-    struct mm_struct* mm,
-    struct isdata_module* mod_hdr,
-    int *mm_locked
-);
-
-long parse_isdata_entries(
-    struct peekable_process* owner,
-    struct peekable_module* module,
-    struct mm_struct* mm,
-    struct isdata_module* mod_hdr,
-    int* mm_locked
-);
+#include <isdata/parse.h>
+#include <isdata/primitive.h>
+#include <isdata/struct.h>
 
 #endif
