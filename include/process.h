@@ -21,6 +21,7 @@ struct peekable_process {
 struct peekable_module {
     struct list_head list;
     char* name;
+    size_t size;
     struct pid* owner_pid;
     void __user* isdata_header;
     struct proc_dir_entry* proc_entry;

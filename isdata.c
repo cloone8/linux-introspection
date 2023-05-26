@@ -12,11 +12,37 @@
 #include <isdata.h>
 #include <debug.h>
 
+static inline uintptr_t align_and_get_size_diff(void** addr, uint64_t align_to) {
+    void* new_addr = (void*) roundup((uintptr_t)(*addr), align_to);
+    uintptr_t size_diff = (uintptr_t) new_addr - (uintptr_t)(*addr);
+    *addr = new_addr;
+
+    return size_diff;
+}
+
 static long parse_isdata_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
-static long parse_isdata_array_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
-static long parse_isdata_single_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
+static long parse_isdata_primitive_array_entry(struct peekable_module* module, struct proc_dir_entry* parent, char* name, void __user* addr, size_t size, size_t num_elems, umode_t perms, struct mm_struct* mm, int* mm_locked);
+static long parse_isdata_primitive_entry(struct peekable_module* module, struct proc_dir_entry* parent, char* name, void __user* addr, size_t size, umode_t perms, struct mm_struct* mm, int* mm_locked);
+static long parse_isdata_struct_entry(
+    struct peekable_module* module,
+    struct proc_dir_entry* parent,
+    char* name,
+    void __user* addr,
+    void __user* structdef,
+    size_t num_elems,
+    umode_t perms,
+    struct mm_struct* mm, int* mm_locked
+);
 static char* get_entry_name(struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
 static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr);
+static long parse_isdata_struct_fields(
+    struct peekable_module* module,
+    struct proc_dir_entry* parent,
+    void __user* addr,
+    umode_t perms,
+    struct isdata_structdef* structdef,
+    struct mm_struct* mm, int* mm_locked
+);
 
 static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr) {
     struct vm_area_struct* vma = vma_lookup(mm, (uintptr_t) addr);
@@ -34,34 +60,24 @@ static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr) {
     }
 }
 
-static long parse_isdata_array_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
+static long parse_isdata_primitive_array_entry(struct peekable_module* module, struct proc_dir_entry* parent, char* name, void __user* addr, size_t size, size_t num_elems, umode_t perms, struct mm_struct* mm, int* mm_locked) {
     uint64_t array_elem;
-    umode_t perms;
-    char* entry_name;
     struct peekable_global* new_global;
-    long to_ret = 0;
-
-    entry_name = get_entry_name(entry, mm, mm_locked);
-
-    if(unlikely(IS_ERR(entry_name))) {
-        log_err("Could not determine entry name in module %s: %ld\n", module->name, PTR_ERR(entry_name));
-        return PTR_ERR(entry_name);
-    }
+    long to_ret = size * num_elems;
 
     new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
 
     if(unlikely(!new_global)) {
-        kfree(entry_name);
         return -ENOMEM;
     }
 
     INIT_LIST_HEAD(&new_global->list);
-    new_global->name = entry_name;
-    new_global->addr = entry->addr;
+    new_global->name = name;
+    new_global->addr = addr;
     new_global->owner_pid = module->owner_pid;
-    new_global->size = entry->size_or_def;
+    new_global->size = size;
 
-    new_global->proc_entry = proc_mkdir_data(entry_name, 0555, module->proc_entry, new_global);
+    new_global->proc_entry = proc_mkdir_data(name, 0555, parent, new_global);
 
     if(unlikely(!new_global->proc_entry)) {
         log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
@@ -69,16 +85,9 @@ static long parse_isdata_array_entry(struct peekable_module* module, struct isda
         goto ret_no_proc_remove;
     }
 
-    proc_set_size(new_global->proc_entry, entry->size_or_def * entry->num_elems);
+    proc_set_size(new_global->proc_entry, size * num_elems);
 
-    perms = get_umode_for_addr(mm, new_global->addr + (array_elem * entry->size_or_def));
-
-    if(unlikely(!perms)) {
-        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr + (array_elem * entry->size_or_def));
-        perms = 0444;
-    }
-
-    for(array_elem = 0; array_elem < entry->num_elems; array_elem++) {
+    for(array_elem = 0; array_elem < num_elems; array_elem++) {
         struct proc_dir_entry* array_elem_entry;
         char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
 
@@ -96,7 +105,7 @@ static long parse_isdata_array_entry(struct peekable_module* module, struct isda
             goto ret_err;
         }
 
-        proc_set_size(array_elem_entry, entry->size_or_def);
+        proc_set_size(array_elem_entry, size);
     }
 
     list_add(&new_global->list, &module->peekable_globals);
@@ -109,61 +118,203 @@ ret_err:
 
 ret_no_proc_remove:
     kfree(new_global);
-    kfree(entry_name);
 
     goto ret;
 }
 
-static long parse_isdata_single_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
-    umode_t perms;
-    char* entry_name;
-    struct peekable_global* new_global;
+static long parse_isdata_struct_fields(
+    struct peekable_module* module,
+    struct proc_dir_entry* parent,
+    void __user* addr,
+    umode_t perms,
+    struct isdata_structdef* structdef,
+    struct mm_struct* mm, int* mm_locked
+) {
+    struct isdata_structfield* fields;
+    uint64_t i;
+    long retval, to_ret = 0;
 
-    entry_name = get_entry_name(entry, mm, mm_locked);
+    fields = kmalloc(structdef->num_fields * sizeof(struct isdata_structfield), GFP_KERNEL);
 
-    if(unlikely(IS_ERR(entry_name))) {
-        log_err("Could not determine entry name in module %s: %ld\n", module->name, PTR_ERR(entry_name));
-        return PTR_ERR(entry_name);
+    if(unlikely(!fields)) {
+        return -ENOMEM;
     }
 
+    retval = copy_data_from_userspace(mm, structdef->fields, fields, structdef->num_fields * sizeof(struct isdata_structfield), mm_locked);
+
+    if(unlikely(retval < 0)) {
+        log_err("Could not copy struct fields from userspace: %ld\n", retval);
+        to_ret = retval;
+        goto ret;
+    }
+
+    log_info("Struct base addr %px, size %llu, max addr %px\n", addr, structdef->size, (void*)(((uintptr_t) addr) + structdef->size));
+
+    for(i = 0; i < structdef->num_fields; i++) {
+        char name_buf[PEEKFS_BUFSIZE] = {0};
+        struct isdata_structfield* field = fields + i;
+        void __user* field_addr = (void*) (((uintptr_t) addr) + (field->offset_in_bits / 8));
+
+        log_info("Parsing field with index %llu, addr %px and offset %llu\n", i, field_addr, field->offset_in_bits / 8);
+
+
+
+        if(unlikely(field->name_len > (PEEKFS_BUFSIZE - 1))) {
+            log_warn("Struct field name too long: %hu/%d. Truncating\n", field->name_len, PEEKFS_BUFSIZE - 1);
+        }
+
+        retval = copy_data_from_userspace(mm, field->name, name_buf, min(field->name_len, (uint16_t) (PEEKFS_BUFSIZE - 1)), mm_locked);
+
+        if(unlikely(retval < 0)) {
+            log_err("Could not copy struct field name from userspace: %ld\n", retval);
+            to_ret = retval;
+            goto ret;
+        }
+
+        if(field->flags & ISDATA_SFFLAG_STRUCT) {
+            log_info("Field is struct called %s with addr %px and %llu elements\n", name_buf, (void*)field->size_bits_or_def, field->num_elems);
+
+            retval = parse_isdata_struct_entry(module, parent, name_buf, field_addr, (void*)field->size_bits_or_def, field->num_elems, perms, mm, mm_locked);
+
+            if(unlikely(retval < 0)) {
+                log_err("Could not parse nested struct for field %s: %ld\n", name_buf, retval);
+                to_ret = retval;
+                goto ret;
+            }
+        } else {
+            log_info("Field called %s with size %llu and %llu elements\n", name_buf, field->size_bits_or_def / 8, field->num_elems);
+
+            peekfs_assert((((uintptr_t) field_addr) + (field->size_bits_or_def / 8)) <= (((uintptr_t) addr) + structdef->size));
+
+            if(field->num_elems > 1) {
+                retval = parse_isdata_primitive_array_entry(module, parent, name_buf, field_addr, field->size_bits_or_def / 8, field->num_elems, perms, mm, mm_locked);
+            } else {
+                retval = parse_isdata_primitive_entry(module, parent, name_buf, field_addr, field->size_bits_or_def / 8, perms, mm, mm_locked);
+            }
+
+            if(unlikely(retval < 0)) {
+                log_err("Could not create primitive entry for field %s: %ld\n", name_buf, retval);
+                to_ret = retval;
+                goto ret;
+            }
+        }
+
+        log_info("Done parsing field %s\n", name_buf);
+    }
+
+ret:
+    kfree(fields);
+    return to_ret;
+}
+
+static long parse_isdata_struct_entry(
+    struct peekable_module* module,
+    struct proc_dir_entry* parent,
+    char* name,
+    void __user* addr,
+    void __user* structdef,
+    size_t num_elems,
+    umode_t perms,
+    struct mm_struct* mm, int* mm_locked
+) {
+    long retval;
+    struct proc_dir_entry* struct_folder_entry;
+    struct isdata_structdef structlayout;
+
+    log_info("Parsing struct %s...\n", name);
+
+    retval = copy_data_from_userspace(mm, structdef, &structlayout, sizeof(struct isdata_structdef), mm_locked);
+
+    if(unlikely(retval != 0)) {
+        log_err("Could not copy struct definition from userspace in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
+        return retval;
+    }
+
+    struct_folder_entry = proc_mkdir_data(name, 0555, parent, NULL);
+
+    if(unlikely(!struct_folder_entry)) {
+        log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
+        return -EIO;
+    }
+
+    if(num_elems <= 1) {
+        retval = parse_isdata_struct_fields(module, struct_folder_entry, addr, perms, &structlayout, mm, mm_locked);
+
+        if(unlikely(retval < 0)) {
+            log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
+            return retval;
+        }
+
+        proc_set_size(struct_folder_entry, structlayout.size);
+
+        log_info("Done parsing struct %s. Total size %llu\n", name, structlayout.size);
+
+        return structlayout.size;
+    } else {
+        size_t i;
+
+        for(i = 0; i < num_elems; i++) {
+            char elem_name[PEEKFS_SMALLBUFSIZE] = {0};
+            struct proc_dir_entry* struct_field_parent;
+            void __user* elem_addr = (void*) (((uintptr_t) addr) + (i * structlayout.size));
+
+            if(unlikely(snprintf(elem_name, PEEKFS_SMALLBUFSIZE - 1, "%lu", i) >= PEEKFS_SMALLBUFSIZE)) {
+                log_err("Array index too high: %lu\n", i);
+                return -E2BIG;
+            }
+
+            struct_field_parent = proc_mkdir_data(elem_name, 0555, struct_folder_entry, NULL);
+
+            if(unlikely(!struct_field_parent)) {
+                log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
+                return -EIO;
+            }
+
+            retval = parse_isdata_struct_fields(module, struct_field_parent, elem_addr, perms, &structlayout, mm, mm_locked);
+
+            if(unlikely(retval < 0)) {
+                log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
+                return retval;
+            }
+
+            proc_set_size(struct_field_parent, structlayout.size);
+        }
+
+        proc_set_size(struct_folder_entry, structlayout.size * structlayout.num_fields);
+
+        log_info("Done parsing struct %s. Total size %llu\n", name, structlayout.size * structlayout.num_fields);
+
+        return structlayout.size * structlayout.num_fields;
+    }
+}
+
+static long parse_isdata_primitive_entry(struct peekable_module* module, struct proc_dir_entry* parent, char* name, void __user* addr, size_t size, umode_t perms, struct mm_struct* mm, int* mm_locked) {
+    struct peekable_global* new_global;
     new_global = kmalloc(sizeof(struct peekable_global), GFP_KERNEL);
 
     if(unlikely(!new_global)) {
-        kfree(entry_name);
         return -ENOMEM;
     }
 
     INIT_LIST_HEAD(&new_global->list);
-    new_global->name = entry_name;
-    new_global->addr = entry->addr;
+    new_global->name = name;
+    new_global->addr = addr;
     new_global->owner_pid = module->owner_pid;
-    new_global->size = entry->size_or_def;
+    new_global->size = size;
 
-    perms = get_umode_for_addr(mm, new_global->addr);
+    new_global->proc_entry = proc_create_data(name, perms, parent, &peek_ops_single, new_global);
 
-    if(unlikely(!perms)) {
-        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", new_global->addr);
-        perms = 0444;
+    if(unlikely(!new_global->proc_entry)) {
+        log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
+        kfree(new_global);
+        return -EIO;
     }
 
-    if(entry->flags & ISDATA_EFLAG_STRUCT) {
-
-    } else {
-        new_global->proc_entry = proc_create_data(entry_name, perms, module->proc_entry, &peek_ops_single, new_global);
-
-        if(unlikely(!new_global->proc_entry)) {
-            log_err("Could not create proc_entry for entry in process %d and module %s\n", pid_nr(module->owner_pid), module->name);
-            kfree(entry_name);
-            kfree(new_global);
-            return -EIO;
-        }
-
-        proc_set_size(new_global->proc_entry, entry->size_or_def);
-    }
+    proc_set_size(new_global->proc_entry, size);
 
     list_add(&new_global->list, &module->peekable_globals);
 
-    return 0;
+    return size;
 }
 
 static char* get_entry_name(struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
@@ -194,19 +345,40 @@ static char* get_entry_name(struct isdata_entry* entry, struct mm_struct* mm, in
 
 static long parse_isdata_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked) {
     long retval;
+    umode_t perms;
+    char* entry_name = get_entry_name(entry, mm, mm_locked);
 
-    if(entry->num_elems > 1) {
-        retval = parse_isdata_array_entry(module, entry, mm, mm_locked);
+    if(unlikely(IS_ERR(entry_name))) {
+        log_err("Could not determine entry name in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, PTR_ERR(entry_name));
+        return PTR_ERR(entry_name);
+    }
+
+    log_info("PARSING ENTRY %s\n", entry_name);
+
+    perms = get_umode_for_addr(mm, entry->addr);
+
+    if(unlikely(!perms)) {
+        log_warn("Could not find VMA for addr %px, defaulting to read-only\n", entry->addr);
+        perms = 0444;
+    }
+
+    if(entry->flags & ISDATA_EFLAG_STRUCT) {
+        retval = parse_isdata_struct_entry(module, module->proc_entry, entry_name, entry->addr, (void*) entry->size_or_def, entry->num_elems, perms, mm, mm_locked);
     } else {
-        retval = parse_isdata_single_entry(module, entry, mm, mm_locked);
+        if(entry->num_elems > 1) {
+            retval = parse_isdata_primitive_array_entry(module, module->proc_entry, entry_name, entry->addr, entry->size_or_def, entry->num_elems, perms, mm, mm_locked);
+        } else {
+            retval = parse_isdata_primitive_entry(module, module->proc_entry, entry_name, entry->addr, entry->size_or_def, perms, mm, mm_locked);
+        }
     }
 
-    if(unlikely(retval != 0)) {
+    if(unlikely(retval < 0)) {
         log_err("Could not create proc_entry for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
-        return retval;
     }
 
-    return 0;
+    log_info("DONE PARSING ENTRY %s\n", entry_name);
+
+    return retval;
 }
 
 struct peekable_module* parse_isdata_header(
@@ -250,6 +422,7 @@ struct peekable_module* parse_isdata_header(
     INIT_LIST_HEAD(&new_module->peekable_globals);
     new_module->isdata_header = isdata_header;
     new_module->name = mod_name;
+    new_module->size = 0;
     new_module->proc_entry = proc_mkdir_data(mod_name, 0555, owner->proc_entry, new_module);
     new_module->owner_pid = owner->pid;
 
@@ -275,6 +448,7 @@ long parse_isdata_entries(
     int* mm_locked
 ) {
     long retval;
+    long total_size = 0;
     long to_ret = 0;
     uint64_t i;
     struct isdata_entry* entries;
@@ -298,12 +472,17 @@ long parse_isdata_entries(
     for(i = 0; i < mod_hdr->num_entries; i++) {
         retval = parse_isdata_entry(module, entries + i, mm, mm_locked);
 
-        if(unlikely(retval != 0)) {
+        if(unlikely(retval < 0)) {
             log_err("Could not parse isdata entry %llu: %ld\n", i, retval);
             to_ret = retval;
             goto ret;
         }
+
+        total_size += retval;
     }
+
+    proc_set_size(module->proc_entry, total_size);
+    module->size = total_size;
 
 ret:
     kfree(entries);

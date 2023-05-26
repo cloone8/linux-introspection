@@ -27,7 +27,22 @@ static void remove_peekable_global(struct peekable_module* module, struct peekab
 static void remove_peekable_module(struct peekable_process *owner, struct peekable_module *module);
 static void remove_peekable_process(struct peekable_process *process);
 static void clear_peekable_processes(void);
+static void calculate_peekable_process_pde_size(struct peekable_process *process);
 
+/**
+ * Requires the process write-lock to be held
+ */
+static void calculate_peekable_process_pde_size(struct peekable_process *process) {
+    struct list_head* cur;
+    long total_size = 0;
+
+    list_for_each(cur, &process->peekable_modules) {
+        struct peekable_module *mod = container_of(cur, struct peekable_module, list);
+        total_size += mod->size;
+    }
+
+    proc_set_size(process->proc_entry, total_size);
+}
 
 /**
  * Requires the owner write-lock to be held
@@ -367,6 +382,8 @@ long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
 
     // Now let's add the module
     new_module = create_peekable_module(module_owner, module_hdr);
+    // And re-calculate the total process proc folder size
+    calculate_peekable_process_pde_size(module_owner);
 
     if(unlikely(IS_ERR(new_module))) {
         to_ret = PTR_ERR(new_module);

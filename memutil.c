@@ -127,9 +127,15 @@ static long do_userspace_copy(struct mm_struct* mm, void __user* user_buf, void*
 }
 
 long copy_data_from_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
+    peekfs_assert(buf != NULL);
+    peekfs_assert(user_buf != NULL);
+
     return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USPACE_COPY_FROM);
 }
 
 long copy_data_to_userspace(struct mm_struct* mm, void __user* user_buf, void* buf, size_t size, int* mm_locked) {
+    peekfs_assert(buf != NULL);
+    peekfs_assert(user_buf != NULL);
+
     return do_userspace_copy(mm, user_buf, buf, size, mm_locked, USPACE_COPY_TO);
 }
