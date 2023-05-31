@@ -39,6 +39,7 @@ struct peekable_global {
 };
 
 long peekfs_clear_task_list(void);
+long peekfs_clone_process(struct pid* base, struct pid* new);
 long peekfs_register_module(struct pid* pid, void __user* module_hdr);
 long peekfs_remove_module(struct pid* pid, void __user* module_hdr);
 long peekfs_remove_task_by_pid(struct pid* pid);

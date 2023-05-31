@@ -250,7 +250,9 @@ static void remove_peekable_module(struct peekable_process *owner, struct peekab
     peekfs_assert(owner != NULL);
     peekfs_assert(!list_entry_is_head(module, &owner->peekable_modules, list));
 
+#ifdef PEEKFS_DEBUG
     log_info("Removing module %s from process %u\n", module->name, pid_nr(owner->pid));
+#endif
 
     // Do this first, so the process cannot be found anymore
     list_for_each_safe(cur, next, &module->peekable_globals) {
@@ -467,6 +469,60 @@ ret_no_unlock_proc:
     up_write(&peekable_process_list_rwsem);
     return to_ret;
 
+}
+
+long peekfs_clone_process(struct pid* base, struct pid* new) {
+    struct peekable_process* base_process;
+    struct peekable_process* new_process;
+    struct list_head* cur;
+    long to_ret = 0;
+    down_write(&peekable_process_list_rwsem);
+
+    base_process = find_process_in_list(base);
+
+    if(!base_process) {
+        goto ret;
+    }
+
+    if(find_process_in_list(new)) {
+        log_err("Attempted to fork into existing process\n");
+        to_ret = -EEXIST;
+        goto ret;
+    }
+
+    new_process = create_peekable_process(new);
+
+    if(IS_ERR(new_process)) {
+        to_ret = PTR_ERR(new_process);
+        goto ret;
+    }
+
+    down_read(&base_process->lock);
+
+    list_for_each(cur, &base_process->peekable_modules) {
+        struct peekable_module* new_module;
+        struct peekable_module* base_module = container_of(cur, struct peekable_module, list);
+
+        new_module = create_peekable_module(new_process, base_module->isdata_header);
+
+        if(unlikely(IS_ERR(new_module))) {
+            to_ret = PTR_ERR(new_module);
+            remove_peekable_process(new_process);
+            up_read(&base_process->lock);
+            goto ret;
+        }
+    }
+
+    calculate_peekable_process_pde_size(new_process);
+
+    to_ret = 1;
+
+    up_read(&base_process->lock);
+    up_write(&new_process->lock);
+
+ret:
+    up_write(&peekable_process_list_rwsem);
+    return to_ret;
 }
 
 long peekfs_clear_task_list(void) {

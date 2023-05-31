@@ -26,11 +26,19 @@ atomic64_t active_handlers = ATOMIC_INIT(0);
 struct proc_dir_entry* proc_main;
 
 // Kprobe related vars
+static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
 static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
 static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* regs);
 
 struct krp_data {
 
+};
+
+static struct kretprobe krp_fork = {
+    .kp.symbol_name = "copy_process",
+    .handler = krp_fork_handler,
+    .data_size = sizeof(struct krp_data),
+    .maxactive = 2 * NR_CPUS
 };
 
 static struct kretprobe krp_exec = {
@@ -133,6 +141,43 @@ static struct proc_ops unregister_ops = {
     .proc_write = unregister_write
 };
 
+static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
+    long retval;
+    struct task_struct* forked_task;
+    struct pid *base_proc, *new_proc;
+
+    atomic64_inc(&active_handlers);
+
+    base_proc = find_get_pid(current->pid);
+
+    if(unlikely(!base_proc)) {
+        log_warn("Couldn't get local PID for PID %d\n", current->pid);
+        goto ret;
+    }
+
+    forked_task = (struct task_struct*) regs_return_value(regs);
+    new_proc = find_get_pid(forked_task->pid);
+
+    if(unlikely(!new_proc)) {
+        log_warn("Couldn't get forked task PID (%d) for PID %d\n", forked_task->pid, current->pid);
+        put_pid(base_proc);
+        goto ret;
+    }
+
+    retval = peekfs_clone_process(base_proc, new_proc);
+
+    if(unlikely(retval < 0)) {
+        log_warn("Couldn't fork %d to %d: %ld\n", current->pid, forked_task->pid, retval);
+    }
+
+    put_pid(new_proc);
+    put_pid(base_proc);
+
+ret:
+    atomic64_dec(&active_handlers);
+    return 0;
+}
+
 static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* regs) {
     long retval;
     struct pid* pid;
@@ -202,8 +247,17 @@ static int peekfs_register_kprobes(void) {
         goto err_register_kprobes_exec;
     }
 
+    retval = register_kretprobe(&krp_fork);
+
+    if(retval < 0) {
+        log_info("Registering fork kretprobe failed, returned %d\n", retval);
+        goto err_register_kprobes_fork;
+    }
+
     return 0;
     // Normally unreachable cleanup routines
+    unregister_kretprobe(&krp_fork);
+err_register_kprobes_fork:
     unregister_kretprobe(&krp_exec);
 err_register_kprobes_exec:
     unregister_kretprobe(&krp_exit);
@@ -212,6 +266,7 @@ err_register_kprobes_exit:
 }
 
 static void peekfs_remove_kprobes(void) {
+    unregister_kretprobe(&krp_fork);
     unregister_kretprobe(&krp_exit);
     unregister_kretprobe(&krp_exec);
 }
