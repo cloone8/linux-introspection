@@ -36,16 +36,10 @@ long parse_isdata_struct_fields(
         goto ret;
     }
 
-    log_info("Struct base addr %px, size %llu, max addr %px\n", addr, structdef->size, (void*)(((uintptr_t) addr) + structdef->size));
-
     for(i = 0; i < structdef->num_fields; i++) {
         char name_buf[PEEKFS_BUFSIZE] = {0};
         struct isdata_structfield* field = fields + i;
         void __user* field_addr = (void*) (((uintptr_t) addr) + (field->offset_in_bits / 8));
-
-        log_info("Parsing field with index %llu, addr %px and offset %llu\n", i, field_addr, field->offset_in_bits / 8);
-
-
 
         if(unlikely(field->name_len > (PEEKFS_BUFSIZE - 1))) {
             log_warn("Struct field name too long: %hu/%d. Truncating\n", field->name_len, PEEKFS_BUFSIZE - 1);
@@ -60,8 +54,6 @@ long parse_isdata_struct_fields(
         }
 
         if(field->flags & ISDATA_SFFLAG_STRUCT) {
-            log_info("Field is struct called %s with addr %px and %llu elements\n", name_buf, (void*)field->size_bits_or_def, field->num_elems);
-
             retval = parse_isdata_struct_entry(module, parent, name_buf, field_addr, (void*)field->size_bits_or_def, field->num_elems, perms, mm, mm_locked);
 
             if(unlikely(retval < 0)) {
@@ -70,8 +62,6 @@ long parse_isdata_struct_fields(
                 goto ret;
             }
         } else {
-            log_info("Field called %s with size %llu and %llu elements\n", name_buf, field->size_bits_or_def / 8, field->num_elems);
-
             peekfs_assert((((uintptr_t) field_addr) + (field->size_bits_or_def / 8)) <= (((uintptr_t) addr) + structdef->size));
 
             if(field->num_elems > 1) {
@@ -86,8 +76,6 @@ long parse_isdata_struct_fields(
                 goto ret;
             }
         }
-
-        log_info("Done parsing field %s\n", name_buf);
     }
 
 ret:
@@ -173,8 +161,6 @@ long parse_isdata_struct_entry(
     struct proc_dir_entry* struct_folder_entry;
     struct isdata_structdef structlayout;
 
-    log_info("Parsing struct %s...\n", name);
-
     retval = copy_data_from_userspace(mm, structdef, &structlayout, sizeof(struct isdata_structdef), mm_locked);
 
     if(unlikely(retval != 0)) {
@@ -199,8 +185,6 @@ long parse_isdata_struct_entry(
         log_err("Could not parse struct definition for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
         return retval;
     }
-
-    log_info("Done parsing struct %s. Total size %lu\n", name, retval);
 
     return retval;
 }

@@ -8,5 +8,6 @@ extern const uint8_t isdata_magic_bytes[ISDATA_MAGIC_BYTES_LEN];
 #include <isdata/parse.h>
 #include <isdata/primitive.h>
 #include <isdata/struct.h>
+#include <isdata/moddir.h>
 
 #endif

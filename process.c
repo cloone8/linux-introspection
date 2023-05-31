@@ -134,6 +134,7 @@ static struct peekable_process *create_peekable_process(struct pid* pid) {
     char name_buf[PEEKFS_SMALLBUFSIZE] = {0};
     struct proc_dir_entry *task_entry;
     struct peekable_process *new_entry;
+    struct mod_dir_entry* mod_dirs;
     int retval;
 
     retval = snprintf(name_buf, PEEKFS_SMALLBUFSIZE - 1, "%d", pid_nr(pid));
@@ -150,6 +151,14 @@ static struct peekable_process *create_peekable_process(struct pid* pid) {
         return ERR_PTR(-EIO);
     }
 
+    mod_dirs = mde_create(task_entry, NULL);
+
+    if(unlikely(mod_dirs == NULL)) {
+        log_err("Could not create mod dirs for task\n");
+        proc_remove(task_entry);
+        return ERR_PTR(-EIO);
+    }
+
     new_entry = kmalloc(sizeof(struct peekable_process), GFP_KERNEL);
 
     if(unlikely(new_entry == NULL)) {
@@ -163,6 +172,7 @@ static struct peekable_process *create_peekable_process(struct pid* pid) {
 
     new_entry->proc_entry = task_entry;
     new_entry->pid = pid;
+    new_entry->mod_dirs = mod_dirs;
     INIT_LIST_HEAD(&new_entry->peekable_modules);
     init_rwsem(&new_entry->lock);
 
@@ -223,8 +233,6 @@ static void remove_peekable_global(struct peekable_module* module, struct peekab
     peekfs_assert(global != NULL);
     peekfs_assert(!list_entry_is_head(global, &module->peekable_globals, list));
 
-    log_info("Removing global %s from module %s\n", global->name, module->name);
-
     list_del(&global->list);
     proc_remove(global->proc_entry);
     kfree(global->name);
@@ -274,6 +282,7 @@ static void remove_peekable_process(struct peekable_process *process) {
         remove_peekable_module(process, module);
     }
 
+    mde_rm(process->mod_dirs);
     list_del(&process->list);
 
     proc_remove(process->proc_entry);

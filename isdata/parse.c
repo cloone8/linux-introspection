@@ -1,5 +1,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
 #include <isdata-headers/isdata_meta.h>
@@ -17,6 +19,7 @@ DEFINE_ISDATA_MAGIC_BYTES(isdata_magic_bytes);
 static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr);
 static char* get_entry_name(struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
 static long parse_isdata_entry(struct peekable_module* module, struct isdata_entry* entry, struct mm_struct* mm, int* mm_locked);
+static struct proc_dir_entry* parse_mod_name(char* name, void* data, struct mod_dir_entry* mde_root);
 
 static umode_t get_umode_for_addr(struct mm_struct* mm, void __user* addr) {
     struct vm_area_struct* vma = vma_lookup(mm, (uintptr_t) addr);
@@ -70,8 +73,6 @@ static long parse_isdata_entry(struct peekable_module* module, struct isdata_ent
         return PTR_ERR(entry_name);
     }
 
-    log_info("PARSING ENTRY %s\n", entry_name);
-
     perms = get_umode_for_addr(mm, entry->addr);
 
     if(unlikely(!perms)) {
@@ -93,11 +94,103 @@ static long parse_isdata_entry(struct peekable_module* module, struct isdata_ent
         log_err("Could not create proc_entry for entry in process %d and module %s: %ld\n", pid_nr(module->owner_pid), module->name, retval);
     }
 
-    log_info("DONE PARSING ENTRY %s\n", entry_name);
-
     kfree(entry_name);
 
     return retval;
+}
+
+static inline size_t count_chars(char* str, char c, size_t maxlen) {
+    size_t found = 0;
+    size_t cur_char = 0;
+
+    while(cur_char < maxlen && str[cur_char] != '\0') {
+        if(str[cur_char] == c) {
+            found++;
+        }
+
+        cur_char++;
+    }
+
+    return found;
+}
+
+static struct proc_dir_entry* parse_mod_name(char* name, void* data, struct mod_dir_entry* mde_root) {
+    size_t name_len;
+    size_t expected_subdirs;
+    size_t parsed_nodes = 0;
+    char* name_cpy;
+    char* cur_token;
+    struct proc_dir_entry* cur_parent = mde_root->entry;
+    struct mod_dir_entry* cur_mde = mde_root;
+
+    name_len = strnlen(name, PEEKFS_HUGEBUFSIZE - 1);
+
+    if(unlikely(name_len >= (PEEKFS_HUGEBUFSIZE - 1))) {
+        log_err("Module name too large to parse\n");
+        return ERR_PTR(-E2BIG);
+    }
+
+    name_cpy = kmalloc(sizeof(char) * (name_len + 1), GFP_KERNEL);
+
+    if(unlikely(!name_cpy)) {
+        return ERR_PTR(-E2BIG);
+    }
+
+    if(unlikely(strscpy(name_cpy, name, name_len + 1) == -E2BIG)) {
+        log_err("Module name too large to copy\n");
+        kfree(name_cpy);
+        return ERR_PTR(-E2BIG);
+    }
+
+    expected_subdirs = count_chars(name, '/', name_len);
+
+    while((cur_token = strsep(&name_cpy, "/")) != NULL) {
+        struct mod_dir_entry* found_mde = mde_lookup(cur_token, cur_mde);
+
+        if(found_mde) {
+            cur_mde = found_mde;
+            cur_parent = found_mde->entry;
+        } else {
+            struct proc_dir_entry* new_entry;
+            void* data_to_set = parsed_nodes < expected_subdirs ? NULL : data;
+
+            new_entry = proc_mkdir_data(cur_token, 0555, cur_parent, data_to_set);
+
+            if(unlikely(!new_entry)) {
+                log_err("Could not create proc entry for mod name part %s\n", cur_token);
+                kfree(name_cpy);
+                return ERR_PTR(-EIO);
+            }
+
+            if(parsed_nodes < expected_subdirs) {
+                struct mod_dir_entry* new_mde = mde_create(new_entry, cur_token);
+
+                if(unlikely(!new_mde)) {
+                    log_err("Could not create MDE for mod name part %s\n", cur_token);
+                    proc_remove(new_entry);
+                    kfree(name_cpy);
+                    return ERR_PTR(-ENOMEM);
+                }
+
+                mde_insert(new_mde, cur_mde);
+
+                cur_mde = new_mde;
+            }
+
+            cur_parent = new_entry;
+        }
+
+        parsed_nodes++;
+    }
+
+    kfree(name_cpy);
+
+    if(unlikely(parsed_nodes != expected_subdirs + 1)) {
+        log_err("Error parsing module path. Name collision for %s. Parsed %lu subdirs\n", name, parsed_nodes);
+        return ERR_PTR(-EIO);
+    }
+
+    return cur_parent;
 }
 
 struct peekable_module* parse_isdata_header(
@@ -142,11 +235,12 @@ struct peekable_module* parse_isdata_header(
     new_module->isdata_header = isdata_header;
     new_module->name = mod_name;
     new_module->size = 0;
-    new_module->proc_entry = proc_mkdir_data(mod_name, 0555, owner->proc_entry, new_module);
+    // new_module->proc_entry = proc_mkdir_data(mod_name, 0555, owner->proc_entry, new_module);
+    new_module->proc_entry = parse_mod_name(mod_name, new_module, owner->mod_dirs);
     new_module->owner_pid = owner->pid;
 
-    if(unlikely(!new_module->proc_entry)) {
-        log_err("Could not register proc entry for pid %d and header %s\n", pid_nr(owner->pid), mod_name);
+    if(unlikely(IS_ERR(new_module->proc_entry))) {
+        log_err("Could not register proc entry for pid %d and header %s: %ld\n", pid_nr(owner->pid), mod_name, PTR_ERR(new_module->proc_entry));
 
         kfree(mod_name);
         kfree(new_module);
@@ -185,8 +279,6 @@ long parse_isdata_entries(
         to_ret = retval;
         goto ret;
     }
-
-    log_info("Parsing %llu entries for module %s in process %d\n", mod_hdr->num_entries, module->name, pid_nr(owner->pid));
 
     for(i = 0; i < mod_hdr->num_entries; i++) {
         retval = parse_isdata_entry(module, entries + i, mm, mm_locked);

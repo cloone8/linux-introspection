@@ -11,6 +11,7 @@ struct peekable_process {
     // Main administrative data
     struct pid* pid;
     struct proc_dir_entry* proc_entry;
+    struct mod_dir_entry* mod_dirs;
 
     // List of modules registered to this process
     struct list_head peekable_modules;
