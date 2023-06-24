@@ -38,11 +38,11 @@ struct peekable_global {
     struct proc_dir_entry* proc_entry;
 };
 
-long peekfs_clear_task_list(void);
-long peekfs_clone_process(struct pid* base, struct pid* new);
-long peekfs_register_module(struct pid* pid, void __user* module_hdr);
-long peekfs_remove_module(struct pid* pid, void __user* module_hdr);
-long peekfs_remove_task_by_pid(struct pid* pid);
-struct peekable_process* peekfs_get_process(struct pid* pid, int access);
+long peekfs_clear_task_list(int atomic);
+long peekfs_clone_process(struct pid* base, struct pid* new, int atomic);
+long peekfs_register_module(struct pid* pid, void __user* module_hdr, int atomic);
+long peekfs_remove_module(struct pid* pid, void __user* module_hdr, int atomic);
+long peekfs_remove_task_by_pid(struct pid* pid, int atomic);
+struct peekable_process* peekfs_get_process(struct pid* pid, int access, int atomic);
 
 #endif

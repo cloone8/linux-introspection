@@ -80,7 +80,7 @@ static ssize_t register_write(struct file* file, const char __user* buffer, size
         goto ret;
     }
 
-    retval = peekfs_register_module(pid, module_hdr);
+    retval = peekfs_register_module(pid, module_hdr, 0);
 
     put_pid(pid);
 
@@ -124,7 +124,7 @@ static ssize_t unregister_write(struct file* file, const char __user* buffer, si
         goto ret;
     }
 
-    retval = peekfs_remove_module(pid, module_hdr);
+    retval = peekfs_remove_module(pid, module_hdr, 0);
 
     if(unlikely(retval != 0)) {
         to_ret = retval;
@@ -164,7 +164,7 @@ static int krp_fork_handler(struct kretprobe_instance* probe, struct pt_regs* re
         goto ret;
     }
 
-    retval = peekfs_clone_process(base_proc, new_proc);
+    retval = peekfs_clone_process(base_proc, new_proc, 1);
 
     if(unlikely(retval < 0)) {
         log_warn("Couldn't fork %d to %d: %ld\n", current->pid, forked_task->pid, retval);
@@ -192,7 +192,7 @@ static int krp_exec_handler(struct kretprobe_instance* probe, struct pt_regs* re
         goto ret;
     }
 
-    retval = peekfs_remove_task_by_pid(pid);
+    retval = peekfs_remove_task_by_pid(pid, 1);
 
     if(unlikely(retval < 0)) {
         log_err("Error trying to remove process %d from peekable process list\n", pid_nr(pid));
@@ -218,7 +218,7 @@ static int krp_exit_handler(struct kretprobe_instance* probe, struct pt_regs* re
         goto ret;
     }
 
-    retval = peekfs_remove_task_by_pid(pid);
+    retval = peekfs_remove_task_by_pid(pid, 1);
 
     if(unlikely(retval < 0)) {
         log_err("Error trying to remove process %d from peekable process list\n", pid_nr(pid));
@@ -315,7 +315,7 @@ static int __init peekfs_init(void) {
     peekfs_remove_kprobes();
 
 err_register_kprobes:
-    peekfs_clear_task_list();
+    peekfs_clear_task_list(0);
     proc_remove(proc_register);
 err_proc_register:
     proc_remove(proc_unregister);
@@ -333,7 +333,7 @@ static void __exit peekfs_exit(void) {
     peekfs_remove_kprobes();
 
     log_info("Destroying peekable task list\n");
-    peekfs_clear_task_list();
+    peekfs_clear_task_list(0);
 
     log_info("Destroying proc filesystem\n");
     proc_remove(proc_main);

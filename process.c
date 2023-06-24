@@ -14,6 +14,7 @@
 #include <debug.h>
 #include <log.h>
 #include <memutil.h>
+#include <semutil.h>
 
 static LIST_HEAD(peekable_process_list);
 
@@ -313,10 +314,10 @@ static void clear_peekable_processes(void) {
 /**
  * Set access to 0 for read-only, 1 for write
 */
-struct peekable_process* peekfs_get_process(struct pid* pid, int access) {
+struct peekable_process* peekfs_get_process(struct pid* pid, int access, int atomic) {
     struct peekable_process* to_ret;
 
-    if(unlikely(down_read_killable(&peekable_process_list_rwsem))) {
+    if(unlikely(down_read_atomic(&peekable_process_list_rwsem, atomic))) {
         return ERR_PTR(-EINTR);
     }
 
@@ -324,12 +325,12 @@ struct peekable_process* peekfs_get_process(struct pid* pid, int access) {
 
     if(likely(to_ret)) {
         if(access) {
-            if(unlikely(down_write_killable(&to_ret->lock))) {
+            if(unlikely(down_write_atomic(&to_ret->lock, atomic))) {
                 up_read(&peekable_process_list_rwsem);
                 return ERR_PTR(-EINTR);
             }
         } else {
-            if(unlikely(down_read_killable(&to_ret->lock))) {
+            if(unlikely(down_read_atomic(&to_ret->lock, atomic))) {
                 up_read(&peekable_process_list_rwsem);
                 return ERR_PTR(-EINTR);
             }
@@ -346,9 +347,11 @@ struct peekable_process* peekfs_get_process(struct pid* pid, int access) {
  * Returns 1 if the process was found and removed, 0 if no process was found
  * and a -ERRVAL if an error was encountered.
  */
-long peekfs_remove_task_by_pid(struct pid* pid) {
+long peekfs_remove_task_by_pid(struct pid* pid, int atomic) {
     struct peekable_process *process;
-    down_write(&peekable_process_list_rwsem);
+    if(unlikely(down_write_atomic(&peekable_process_list_rwsem, atomic))) {
+        return -EINTR;
+    }
 
     process = find_process_in_list(pid);
 
@@ -358,7 +361,10 @@ long peekfs_remove_task_by_pid(struct pid* pid) {
         return 0;
     }
 
-    down_write(&process->lock);
+    if(unlikely(down_write_atomic(&process->lock, atomic))) {
+        up_write(&peekable_process_list_rwsem);
+        return -EINTR;
+    }
 
     remove_peekable_process(process);
 
@@ -367,13 +373,13 @@ long peekfs_remove_task_by_pid(struct pid* pid) {
 
 }
 
-long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
+long peekfs_register_module(struct pid* pid, void __user* module_hdr, int atomic) {
     struct peekable_process* module_owner;
     int new_process_created = 0;
     struct peekable_module* new_module;
     long to_ret = 0;
 
-    if(unlikely(down_write_killable(&peekable_process_list_rwsem))) {
+    if(unlikely(down_write_atomic(&peekable_process_list_rwsem, atomic))) {
         return -EINTR;
     }
 
@@ -381,7 +387,7 @@ long peekfs_register_module(struct pid* pid, void __user* module_hdr) {
 
     if(likely(module_owner)) {
         // The process already exists. Lock it, and add a module to it
-        if(unlikely(down_write_killable(&module_owner->lock))) {
+        if(unlikely(down_write_atomic(&module_owner->lock, atomic))) {
             to_ret = -EINTR;
             goto ret_unlock_list;
         }
@@ -431,12 +437,14 @@ ret_unlock_list:
     }
 }
 
-long peekfs_remove_module(struct pid* pid, void __user* module_hdr) {
+long peekfs_remove_module(struct pid* pid, void __user* module_hdr, int atomic) {
     long to_ret = 0;
     struct peekable_process* process;
     struct peekable_module* module;
 
-    down_write(&peekable_process_list_rwsem);
+    if(unlikely(down_write_atomic(&peekable_process_list_rwsem, atomic))) {
+        return -EINTR;
+    }
 
     process = find_process_in_list(pid);
 
@@ -446,7 +454,10 @@ long peekfs_remove_module(struct pid* pid, void __user* module_hdr) {
         goto ret_no_unlock_proc;
     }
 
-    down_write(&process->lock);
+    if(unlikely(down_write_atomic(&process->lock, atomic))) {
+        to_ret = -EINTR;
+        goto ret_no_unlock_proc;
+    }
 
     module = find_module_in_list(process, module_hdr);
 
@@ -471,12 +482,15 @@ ret_no_unlock_proc:
 
 }
 
-long peekfs_clone_process(struct pid* base, struct pid* new) {
+long peekfs_clone_process(struct pid* base, struct pid* new, int atomic) {
     struct peekable_process* base_process;
     struct peekable_process* new_process;
     struct list_head* cur;
     long to_ret = 0;
-    down_write(&peekable_process_list_rwsem);
+
+    if(unlikely(down_write_atomic(&peekable_process_list_rwsem, atomic))) {
+        return -EINTR;
+    }
 
     base_process = find_process_in_list(base);
 
@@ -497,7 +511,10 @@ long peekfs_clone_process(struct pid* base, struct pid* new) {
         goto ret;
     }
 
-    down_read(&base_process->lock);
+    if(unlikely(down_read_atomic(&base_process->lock, atomic))) {
+        to_ret = -EINTR;
+        goto ret;
+    }
 
     list_for_each(cur, &base_process->peekable_modules) {
         struct peekable_module* new_module;
@@ -525,9 +542,13 @@ ret:
     return to_ret;
 }
 
-long peekfs_clear_task_list(void) {
-    down_write(&peekable_process_list_rwsem);
+long peekfs_clear_task_list(int atomic) {
+    if(unlikely(down_write_atomic(&peekable_process_list_rwsem, atomic))) {
+        return -EINTR;
+    }
+
     clear_peekable_processes();
+
     up_write(&peekable_process_list_rwsem);
 
     return 0;

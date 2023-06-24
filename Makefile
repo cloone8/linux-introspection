@@ -7,7 +7,7 @@ peekfs-y+= isdata/parse.o isdata/primitive.o isdata/struct.o isdata/moddir.o
 ccflags-y+=-Wall -Werror -I$(src)/include
 
 # Remove this line if debugging should be turned off
-ccflags-y+= -DPEEKFS_DEBUG
+# ccflags-y+= -DPEEKFS_DEBUG
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build/ M=$(PWD) modules

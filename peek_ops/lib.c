@@ -30,7 +30,7 @@ static long get_proc_structs(struct pid* pid, struct peekable_process** process_
     peekfs_assert(mm_ret != NULL);
 
     // Let's find out what variable and what process has been read
-    process = peekfs_get_process(pid, 0);
+    process = peekfs_get_process(pid, 0, 0);
 
     if(unlikely(IS_ERR(process))) {
         log_err("Error finding process to be introspected: %ld\n", PTR_ERR(process));
@@ -51,7 +51,7 @@ static long get_proc_structs(struct pid* pid, struct peekable_process** process_
         up_read(&process->lock);
         log_err("Could not get process task struct for PID %u\n", pid_nr(missing_pid));
 
-        retval = peekfs_remove_task_by_pid(missing_pid);
+        retval = peekfs_remove_task_by_pid(missing_pid, 0);
 
         if(unlikely(retval != 1)) {
             if(retval == 0) {
