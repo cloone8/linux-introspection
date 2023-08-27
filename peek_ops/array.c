@@ -1,4 +1,5 @@
 #include <linux/proc_fs.h>
+#include <linux/fs.h>
 #include <peek_ops.h>
 
 #include "internal.h"
@@ -16,4 +17,5 @@ struct proc_ops peek_ops_array = {
     .proc_write = array_write_handler,
     .proc_open = open_handler,
     .proc_release = close_handler,
+    .proc_lseek = default_llseek
 };
